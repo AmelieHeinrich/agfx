@@ -80,3 +80,8 @@ On Windows:
 
 ## Changelogs
 - v1.0.0: Base Metal4/D3D12 backends with basic features, missing raytracing/draw indirect. Fully usable for a video game.
+
+## Projects that use AGFX
+
+- Eclipse (Amélie Heinrich) : Adventure puzzle game where you set out to vanquish an evil force trying to plunge the world into darkness.
+- Bane of the Heavens (RyDawgE) : Adventure voxel game
