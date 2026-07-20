@@ -8,6 +8,7 @@
 #include <Metal/Metal.h>
 #include <QuartzCore/QuartzCore.h>
 #include <vector>
+#include <Foundation/Foundation.h>
 
 #define IR_PRIVATE_IMPLEMENTATION
 #include "msc_runtime/metal_irconverter_runtime.h"
@@ -45,10 +46,29 @@ struct agfxSwapChain {
     agfxTexture* wrapperTexture; // reused each frame, ->texture repointed at the current drawable's texture
 };
 
-struct agfxMetalBindlessAllocation
-{
+struct agfxMetalBindlessAllocation {
     uint64_t handle;
     MTLResourceID resourceID;
+};
+
+struct agfxAccelerationStructure {
+    agfxAccelerationStructureCreateInfo createInfo;
+    id<MTLAccelerationStructure> accelerationStructure;
+    MTLAccelerationStructureSizes sizes;
+
+    // For top level
+    id<MTLBuffer> instanceBuffer;
+    MTLIndirectAccelerationStructureInstanceDescriptor* mappedInstanceBuffer;
+    agfxMetalBindlessAllocation asBindlessHandle;
+
+    id<MTLBuffer> resourceIDBuffer; // Needed by MSC
+    void* mappedResourceIDBuffer;
+    MTL4InstanceAccelerationStructureDescriptor* mtlTopLevelDescriptor;
+
+    uint32_t currentInstanceCount;
+
+    // For bottom level
+    MTL4PrimitiveAccelerationStructureDescriptor* mtlBottomLevelDescriptor;
 };
 
 struct agfxSlotAllocator {
@@ -224,6 +244,25 @@ struct agfxMetalBindlessManager {
     }
 
     void freeBuffer(uint64_t handle) {
+        resourceAllocator.free(handle);
+    }
+
+    agfxMetalBindlessAllocation writeAccelerationStructure(agfxAccelerationStructure* accelerationStructure) {
+        uint64_t slotIndex = resourceAllocator.allocate();
+        if (slotIndex == UINT64_MAX) {
+            return {};
+        }
+
+        agfxMetalBindlessAllocation allocation;
+        allocation.handle = slotIndex;
+        allocation.resourceID = {};
+
+        IRDescriptorTableEntry* entry = (IRDescriptorTableEntry*)resourceHeapBuffer.contents;
+        entry->gpuVA = accelerationStructure->resourceIDBuffer.gpuAddress;
+        return allocation;
+    }
+
+    void freeAccelerationStructure(uint64_t handle) {
         resourceAllocator.free(handle);
     }
 
@@ -686,23 +725,46 @@ void agfxComputePassDispatch(agfxComputePass* computePass, uint32_t groupCountX,
 }
 
 void agfxComputePassBuildAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* accelerationStructure, agfxBuffer* scratchBuffer, uint64_t scratchBufferOffset) {
-    // TODO
+    if (accelerationStructure->createInfo.type == AGFX_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL) {
+        [computePass->encoder buildAccelerationStructure:accelerationStructure->accelerationStructure
+                                descriptor:accelerationStructure->mtlTopLevelDescriptor
+                                scratchBuffer:MTL4BufferRangeMake(scratchBuffer->buffer.gpuAddress + scratchBufferOffset, scratchBuffer->createInfo.size)];
+    } else {
+        [computePass->encoder buildAccelerationStructure:accelerationStructure->accelerationStructure
+                                descriptor:accelerationStructure->mtlBottomLevelDescriptor
+                                scratchBuffer:MTL4BufferRangeMake(scratchBuffer->buffer.gpuAddress + scratchBufferOffset, scratchBuffer->createInfo.size)];
+    }
 }
 
-void agfxComputePassUpdateAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* accelerationStructure, agfxBuffer* scratchBuffer, uint64_t scratchBufferOffset) {
-    // TODO
+void agfxComputePassUpdateAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* srcAccelerationStructure, agfxAccelerationStructure* dstAccelerationStructure, agfxBuffer* scratchBuffer, uint64_t scratchBufferOffset) {
+    if (!dstAccelerationStructure->createInfo.allowUpdate) return;
+
+    if (dstAccelerationStructure->createInfo.type == AGFX_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL) {
+        [computePass->encoder refitAccelerationStructure:srcAccelerationStructure->accelerationStructure
+                                descriptor:srcAccelerationStructure->mtlTopLevelDescriptor
+                                destination:dstAccelerationStructure->accelerationStructure
+                                scratchBuffer:MTL4BufferRangeMake(scratchBuffer->buffer.gpuAddress + scratchBufferOffset, scratchBuffer->createInfo.size)];
+    } else {
+        [computePass->encoder refitAccelerationStructure:srcAccelerationStructure->accelerationStructure
+                                descriptor:srcAccelerationStructure->mtlBottomLevelDescriptor
+                                destination:dstAccelerationStructure->accelerationStructure
+                                scratchBuffer:MTL4BufferRangeMake(scratchBuffer->buffer.gpuAddress + scratchBufferOffset, scratchBuffer->createInfo.size)];
+    }
 }
 
 void agfxComputePassCopyAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* srcAccelerationStructure, agfxAccelerationStructure* dstAccelerationStructure) {
-    // TODO
+    [computePass->encoder copyAccelerationStructure:srcAccelerationStructure->accelerationStructure
+                                toAccelerationStructure:dstAccelerationStructure->accelerationStructure];
 }
 
 void agfxComputePassWriteCompactedSizeToBuffer(agfxComputePass* computePass, agfxAccelerationStructure* accelerationStructure, agfxBuffer* dstBuffer, uint64_t dstBufferOffset) {
-    // TODO
+    [computePass->encoder writeCompactedAccelerationStructureSize:accelerationStructure->accelerationStructure
+                                toBuffer:MTL4BufferRangeMake(dstBuffer->buffer.gpuAddress + dstBufferOffset, sizeof(uint64_t))];
 }
 
 void agfxComputePassCompactAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* srcAccelerationStructure, agfxAccelerationStructure* dstAccelerationStructure) {
-    // TODO
+    [computePass->encoder copyAndCompactAccelerationStructure:srcAccelerationStructure->accelerationStructure
+                                toAccelerationStructure:dstAccelerationStructure->accelerationStructure];
 }
 
 // Buffer
@@ -1180,31 +1242,123 @@ void agfxComputePipelineDestroy(agfxDevice* device, agfxComputePipeline* pipelin
 
 // Acceleration structure
 agfxAccelerationStructure* agfxAccelerationStructureCreate(agfxDevice* device, const agfxAccelerationStructureCreateInfo* createInfo) {
-    return nullptr;
+    agfxAccelerationStructure* accelerationStructure = (agfxAccelerationStructure*)device->createInfo.allocate(sizeof(agfxAccelerationStructure));
+    memcpy(&accelerationStructure->createInfo, createInfo, sizeof(agfxAccelerationStructureCreateInfo));
+    
+    if (createInfo->type == AGFX_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL) {
+        uint32_t geometryCount = createInfo->bottomLevel.geometryCount;
+        NSMutableArray<MTL4AccelerationStructureGeometryDescriptor*>* geometries = [NSMutableArray arrayWithCapacity:geometryCount];
+
+        for (uint32_t i = 0; i < createInfo->bottomLevel.geometryCount; i++) {
+            agfxAccelerationStructureGeometry* geometry = &createInfo->bottomLevel.geometries[i];
+            if (geometry->type == AGFX_ACCELERATION_STRUCTURE_GEOMETRY_TYPE_TRIANGLES) {
+                MTL4AccelerationStructureTriangleGeometryDescriptor* geometryDescriptor = [[MTL4AccelerationStructureTriangleGeometryDescriptor alloc] init];
+                geometryDescriptor.vertexBuffer = geometry->triangles.vertexBuffer->buffer.gpuAddress + geometry->triangles.vertexOffset;
+                geometryDescriptor.vertexStride = geometry->triangles.vertexBuffer->createInfo.stride;
+                geometryDescriptor.vertexFormat = MTLAttributeFormatFloat3;
+                geometryDescriptor.indexBuffer = geometry->triangles.indexBuffer->buffer.gpuAddress + geometry->triangles.indexOffset;
+                geometryDescriptor.indexType = geometry->triangles.indexBuffer->createInfo.stride == 4 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
+                geometryDescriptor.triangleCount = geometry->triangles.indexCount / 3;
+                geometryDescriptor.opaque = geometry->opaque ? YES : NO;
+
+                [geometries addObject:geometryDescriptor];
+            } else {
+                MTL4AccelerationStructureBoundingBoxGeometryDescriptor* geometryDescriptor = [[MTL4AccelerationStructureBoundingBoxGeometryDescriptor alloc] init];
+                geometryDescriptor.boundingBoxBuffer = geometry->aabbs.aabbBuffer->buffer.gpuAddress + geometry->aabbs.aabbOffset;
+                geometryDescriptor.boundingBoxCount = geometry->aabbs.aabbCount;
+                geometryDescriptor.boundingBoxStride = geometry->aabbs.aabbStride;
+                geometryDescriptor.opaque = geometry->opaque ? YES : NO;
+
+                [geometries addObject:geometryDescriptor];
+            }
+        }
+
+        MTL4PrimitiveAccelerationStructureDescriptor* asDesc = [[MTL4PrimitiveAccelerationStructureDescriptor alloc] init];
+        asDesc.usage = MTLAccelerationStructureUsagePreferFastBuild;
+        if (createInfo->allowUpdate) {
+            asDesc.usage |= MTLAccelerationStructureUsageRefit;
+        }
+        asDesc.geometryDescriptors = geometries;
+
+        accelerationStructure->sizes = [device->device accelerationStructureSizesWithDescriptor:asDesc];
+        accelerationStructure->mtlBottomLevelDescriptor = asDesc;
+
+        accelerationStructure->accelerationStructure = [device->device newAccelerationStructureWithSize:accelerationStructure->sizes.accelerationStructureSize];
+        [device->residencySet addAllocation:accelerationStructure->accelerationStructure];
+    } else {
+        MTL4InstanceAccelerationStructureDescriptor* asDesc = [[MTL4InstanceAccelerationStructureDescriptor alloc] init];
+        asDesc.instanceCount = createInfo->topLevel.maxInstanceCount;
+        asDesc.usage = MTLAccelerationStructureUsagePreferFastIntersection;
+        if (createInfo->allowUpdate) {
+            asDesc.usage |= MTLAccelerationStructureUsageRefit;
+        }
+
+        accelerationStructure->instanceBuffer = [device->device newBufferWithLength:createInfo->topLevel.maxInstanceCount * sizeof(MTLIndirectAccelerationStructureInstanceDescriptor) options:MTLResourceStorageModeShared];
+        accelerationStructure->mappedInstanceBuffer = (MTLIndirectAccelerationStructureInstanceDescriptor*)accelerationStructure->instanceBuffer.contents;
+        [device->residencySet addAllocation:accelerationStructure->instanceBuffer];
+
+        accelerationStructure->resourceIDBuffer = [device->device newBufferWithLength:sizeof(uint64_t) options:MTLResourceStorageModeShared];
+        accelerationStructure->mappedResourceIDBuffer = (uint64_t*)accelerationStructure->resourceIDBuffer.contents;
+        [device->residencySet addAllocation:accelerationStructure->resourceIDBuffer];
+
+        accelerationStructure->sizes = [device->device accelerationStructureSizesWithDescriptor:asDesc];
+        accelerationStructure->accelerationStructure = [device->device newAccelerationStructureWithSize:accelerationStructure->sizes.accelerationStructureSize];
+        [device->residencySet addAllocation:accelerationStructure->accelerationStructure];
+        
+        uint64_t resourceID = accelerationStructure->accelerationStructure.gpuResourceID._impl;
+        memcpy(accelerationStructure->mappedResourceIDBuffer, &resourceID, sizeof(uint64_t));
+
+        accelerationStructure->asBindlessHandle = device->bindlessManager->writeAccelerationStructure(accelerationStructure);
+        accelerationStructure->mtlTopLevelDescriptor = asDesc;
+    }
+
+    accelerationStructure->accelerationStructure.label = [NSString stringWithUTF8String:createInfo->name];
+    return accelerationStructure;
 }
 
 agfxAccelerationStructure* agfxAccelerationStructureCreateCompacted(agfxDevice* device, const agfxAccelerationStructureCreateInfo* createInfo, uint64_t compactedSize) {
-    return nullptr;
+    agfxAccelerationStructure* accelerationStructure = (agfxAccelerationStructure*)device->createInfo.allocate(sizeof(agfxAccelerationStructure));
+    memcpy(&accelerationStructure->createInfo, createInfo, sizeof(agfxAccelerationStructureCreateInfo));
+    accelerationStructure->sizes.accelerationStructureSize = compactedSize;
+    accelerationStructure->accelerationStructure = [device->device newAccelerationStructureWithSize:compactedSize];
+    [device->residencySet addAllocation:accelerationStructure->accelerationStructure];
+    accelerationStructure->accelerationStructure.label = [NSString stringWithUTF8String:createInfo->name];
+    return accelerationStructure;
 }
 
 void agfxAccelerationStructureDestroy(agfxDevice* device, agfxAccelerationStructure* accelerationStructure) {
-
+    accelerationStructure->accelerationStructure = nil;
+    if (accelerationStructure->instanceBuffer) accelerationStructure->instanceBuffer = nil;
+    if (accelerationStructure->resourceIDBuffer) accelerationStructure->resourceIDBuffer = nil;
+    device->bindlessManager->freeAccelerationStructure(accelerationStructure->asBindlessHandle.handle);
+    device->createInfo.free(accelerationStructure);
 }
 
 void agfxAccelerationStructureGetSizes(agfxDevice* device, agfxAccelerationStructure* accelerationStructure, agfxAccelerationStructureSizes* sizes) {
-
+    sizes->scratchBufferSize = accelerationStructure->sizes.buildScratchBufferSize;
+    sizes->updateScratchBufferSize = accelerationStructure->sizes.refitScratchBufferSize;
 }
 
 uint64_t agfxAccelerationStructureGetHandle(agfxAccelerationStructure* accelerationStructure) {
-    return 0;
+    return accelerationStructure->asBindlessHandle.handle;
 }
 
 void agfxAccelerationStructureAddInstances(agfxAccelerationStructure* accelerationStructure, const agfxAccelerationStructureInstance* instances, uint32_t instanceCount) {
+    for (uint32_t i = 0; i < instanceCount; ++i) {
+        const agfxAccelerationStructureInstance* instance = &instances[i];
 
+        MTLIndirectAccelerationStructureInstanceDescriptor& mtlInstance = accelerationStructure->mappedInstanceBuffer[accelerationStructure->currentInstanceCount + i];
+        mtlInstance.accelerationStructureID = instance->blas->accelerationStructure.gpuResourceID;
+        memcpy(&mtlInstance.transformationMatrix, instance->transform, sizeof(float) * 12);
+        mtlInstance.options = instance->opaque ? MTLAccelerationStructureInstanceOptionOpaque :  MTLAccelerationStructureInstanceOptionNonOpaque;
+        mtlInstance.mask = 0xFF;
+        mtlInstance.userID = instance->userID;
+    }
+    accelerationStructure->currentInstanceCount += instanceCount;
 }
 
 void agfxAccelerationStructureResetInstances(agfxAccelerationStructure* accelerationStructure) {
-
+    accelerationStructure->currentInstanceCount = 0;
 }
 
 //

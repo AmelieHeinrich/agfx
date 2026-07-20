@@ -479,6 +479,8 @@ typedef enum agfxAccelerationStructureGeometryType {
 typedef struct agfxAccelerationStructureGeometry {
     /// @brief The type of geometry (triangles or AABBs)
     agfxAccelerationStructureGeometryType type;
+    /// @brief Whether the geometry is opaque or not. Opaque geometries can be used for early ray termination and other optimizations.
+    agfxBool opaque;
     union {
         struct {
             /// @brief The vertex buffer containing the triangle vertices
@@ -514,17 +516,13 @@ typedef struct agfxAccelerationStructureInstance {
     /// @brief The 3x4 row-major transform matrix for the instance
     float transform[12];
     /// @brief The instance ID, used for identifying the instance in shaders
-    uint32_t user_id;
+    uint32_t userID;
     /// @brief Whether the instance is opaque or not. Opaque instances can be used for early ray termination and other optimizations.
     agfxBool opaque;
 } agfxAccelerationStructureInstance;
 
 /// @brief A structure containing information for creating a bottom-level acceleration structure
 typedef struct agfxBottomLevelAccelerationStructureCreateInfo {
-    /// @brief Whether the acceleration structure can be updated after creation. If true, the acceleration structure can be rebuilt
-    /// to support things like dynamic geometry (e.g. skinned meshes). If false, the acceleration structure is static and cannot be updated.
-    agfxBool allowUpdate;
-
     /// @brief The geometries to include in the bottom-level acceleration structure
     agfxAccelerationStructureGeometry* geometries;
     /// @brief The number of geometries in the geometries array
@@ -545,6 +543,9 @@ typedef struct agfxAccelerationStructureCreateInfo {
     agfxBottomLevelAccelerationStructureCreateInfo bottomLevel;
     /// @brief The creation info for the top-level acceleration structure, if type is AGFX_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL
     agfxTopLevelAccelerationStructureCreateInfo topLevel;
+    /// @brief Whether the acceleration structure can be updated after creation. If true, the acceleration structure can be rebuilt
+    /// to support things like dynamic geometry (e.g. skinned meshes). If false, the acceleration structure is static and cannot be updated.
+    agfxBool allowUpdate;
     /// @brief A debug name for the acceleration structure, visible in graphics debuggers.
     const char* name;
 } agfxAccelerationStructureCreateInfo;
@@ -721,10 +722,11 @@ void agfxComputePassBuildAccelerationStructure(agfxComputePass* computePass, agf
 
 /// @brief Updates a bottom-level or top-level acceleration structure using the specified scratch buffer.
 /// @param computePass A pointer to the agfxComputePass to record the update in.
-/// @param accelerationStructure A pointer to the agfxAccelerationStructure to update.
+/// @param srcAccelerationStructure A pointer to the source agfxAccelerationStructure to update from.
+/// @param dstAccelerationStructure A pointer to the destination agfxAccelerationStructure to update to.
 /// @param scratchBuffer A pointer to an agfxBuffer to use as scratch space for the update. Must be at least the size returned by agfxAccelerationStructureGetSizes for the acceleration structure.
 /// @param scratchBufferOffset The byte offset into the scratch buffer to use for the update.
-void agfxComputePassUpdateAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* accelerationStructure, agfxBuffer* scratchBuffer, uint64_t scratchBufferOffset);
+void agfxComputePassUpdateAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* srcAccelerationStructure, agfxAccelerationStructure* dstAccelerationStructure, agfxBuffer* scratchBuffer, uint64_t scratchBufferOffset);
 
 /// @brief Copies a bottom-level or top-level acceleration structure to another acceleration structure.
 /// @param computePass A pointer to the agfxComputePass to record the copy in.
