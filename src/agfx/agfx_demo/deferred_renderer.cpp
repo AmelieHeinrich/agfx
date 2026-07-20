@@ -46,6 +46,8 @@ struct LightingPushConstants {
     uint32_t shadowComparisonSampler;
     uint32_t pointSampler;
     uint32_t aoTex;
+    uint32_t reflTex;
+    uint32_t reflectionsEnabled;
 };
 
 struct SSAOSceneConstants {
@@ -168,6 +170,16 @@ void DeferredRenderer::CreateGBufferTargets(agfxDevice* device, uint32_t width, 
     aoInfo.mipLevels = 1;
     aoTexture = agfxTextureCreate(device, &aoInfo);
 
+    agfxTextureCreateInfo reflInfo = {};
+    reflInfo.type = AGFX_TEXTURE_TYPE_2D;
+    reflInfo.format = AGFX_TEXTURE_FORMAT_RGBA16F;
+    reflInfo.usage = (agfxTextureUsage)(AGFX_TEXTURE_USAGE_SAMPLED | AGFX_TEXTURE_USAGE_STORAGE);
+    reflInfo.width = width;
+    reflInfo.height = height;
+    reflInfo.depthOrArrayLayers = 1;
+    reflInfo.mipLevels = 1;
+    reflTexture = agfxTextureCreate(device, &reflInfo);
+
     auto makeViews = [&](agfxTexture* tex, agfxTextureFormat fmt, agfxTextureView** sampledView, agfxRenderTarget** rt, bool isDepth) {
         agfxTextureViewCreateInfo viewInfo = {};
         viewInfo.texture = tex;
@@ -203,6 +215,19 @@ void DeferredRenderer::CreateGBufferTargets(agfxDevice* device, uint32_t width, 
     aoUAVInfo.writeable = true;
     aoUAVView = agfxTextureViewCreate(device, &aoUAVInfo);
 
+    agfxTextureViewCreateInfo reflViewInfo = {};
+    reflViewInfo.texture = reflTexture;
+    reflViewInfo.format = AGFX_TEXTURE_FORMAT_RGBA16F;
+    reflViewInfo.type = AGFX_TEXTURE_TYPE_2D;
+    reflViewInfo.mipLevelCount = 1;
+    reflViewInfo.arrayLayerCount = 1;
+    reflViewInfo.writeable = false;
+    reflView = agfxTextureViewCreate(device, &reflViewInfo);
+
+    agfxTextureViewCreateInfo reflUAVInfo = reflViewInfo;
+    reflUAVInfo.writeable = true;
+    reflUAVView = agfxTextureViewCreate(device, &reflUAVInfo);
+
     agfxDeviceMakeResourcesResident(device);
 }
 
@@ -232,11 +257,17 @@ void DeferredRenderer::DestroyGBufferTargets(agfxDevice* device)
     if (aoView) agfxTextureViewDestroy(device, aoView);
     if (aoTexture) agfxTextureDestroy(device, aoTexture);
 
+    if (reflUAVView) agfxTextureViewDestroy(device, reflUAVView);
+    if (reflView) agfxTextureViewDestroy(device, reflView);
+    if (reflTexture) agfxTextureDestroy(device, reflTexture);
+
     albedoRT = normalRT = mraRT = depthRT = hdrRT = nullptr;
     albedoView = normalView = mraView = depthView = hdrView = nullptr;
     albedoTexture = normalTexture = mraTexture = depthTexture = hdrTexture = nullptr;
     aoUAVView = aoView = nullptr;
     aoTexture = nullptr;
+    reflUAVView = reflView = nullptr;
+    reflTexture = nullptr;
 }
 
 void DeferredRenderer::CreateShadowTargets(agfxDevice* device, uint32_t resolution)
@@ -359,6 +390,7 @@ void DeferredRenderer::Init(agfxDevice* device, agfxTextureFormat swapchainForma
     RecreateTonemapPipeline(device, swapchainFormat);
 
     ssao = new AgfxSSAO(device);
+    reflections = new AgfxReflections(device);
 
     CreateGBufferTargets(device, width, height);
     CreateShadowTargets(device, csm.shadowMapResolution);
@@ -427,6 +459,17 @@ void DeferredRenderer::Init(agfxDevice* device, agfxTextureFormat swapchainForma
         scbViewInfo.buffer = ssaoSceneCB[i];
         scbViewInfo.type = AGFX_BUFFER_VIEW_TYPE_STRUCTURED;
         ssaoSceneCBView[i] = agfxBufferViewCreate(device, &scbViewInfo);
+
+        agfxBufferCreateInfo rcbInfo = {};
+        rcbInfo.size = sizeof(LightingSceneConstants);
+        rcbInfo.stride = sizeof(LightingSceneConstants);
+        rcbInfo.usage = AGFX_BUFFER_USAGE_SHADER_READ;
+        rcbInfo.memoryType = AGFX_BUFFER_MEMORY_TYPE_CPU_TO_GPU;
+        reflectionSceneCB[i] = agfxBufferCreate(device, &rcbInfo);
+        agfxBufferViewCreateInfo rcbViewInfo = {};
+        rcbViewInfo.buffer = reflectionSceneCB[i];
+        rcbViewInfo.type = AGFX_BUFFER_VIEW_TYPE_STRUCTURED;
+        reflectionSceneCBView[i] = agfxBufferViewCreate(device, &rcbViewInfo);
     }
 
     agfxDeviceMakeResourcesResident(device);
@@ -446,11 +489,18 @@ void DeferredRenderer::Shutdown(agfxDevice* device)
         if (cascadeCB[i]) agfxBufferDestroy(device, cascadeCB[i]);
         if (ssaoSceneCBView[i]) agfxBufferViewDestroy(device, ssaoSceneCBView[i]);
         if (ssaoSceneCB[i]) agfxBufferDestroy(device, ssaoSceneCB[i]);
+        if (reflectionSceneCBView[i]) agfxBufferViewDestroy(device, reflectionSceneCBView[i]);
+        if (reflectionSceneCB[i]) agfxBufferDestroy(device, reflectionSceneCB[i]);
     }
 
     if (ssao) {
         delete ssao;
         ssao = nullptr;
+    }
+
+    if (reflections) {
+        delete reflections;
+        reflections = nullptr;
     }
 
     if (pointSampler) agfxSamplerDestroy(device, pointSampler);
@@ -668,6 +718,50 @@ void DeferredRenderer::RenderShadows(agfxDevice* device, agfxCommandBuffer* cmdB
     }
 }
 
+void DeferredRenderer::RenderReflections(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const GltfScene& scene, const Camera& camera, const LightSettings& light, uint32_t frameSlot)
+{
+    reflectionsRanThisFrame = false;
+    if (!scene.tlas || !reflectionSettings.enabled) return;
+    reflectionsRanThisFrame = true;
+
+    glm::mat4 view = camera.GetView();
+    glm::mat4 proj = camera.GetProj();
+    glm::mat4 viewProj = proj * view;
+
+    LightingSceneConstants sceneConstants = {};
+    sceneConstants.invViewProj = glm::inverse(viewProj);
+    sceneConstants.cameraPos = camera.position;
+    sceneConstants.lightDir = glm::normalize(light.direction);
+    sceneConstants.lightColor = light.color;
+    sceneConstants.lightIntensity = light.intensity;
+    void* cbDst = agfxBufferMap(reflectionSceneCB[frameSlot]);
+    memcpy(cbDst, &sceneConstants, sizeof(sceneConstants));
+    agfxBufferUnmap(reflectionSceneCB[frameSlot]);
+    agfxDeviceMakeResourcesResident(device);
+
+    agfxCommandBufferTextureBarrier(cmdBuffer, albedoTexture, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, 0, 0, true);
+    agfxCommandBufferTextureBarrier(cmdBuffer, normalTexture, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, 0, 0, true);
+    agfxCommandBufferTextureBarrier(cmdBuffer, mraTexture, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, 0, 0, true);
+    agfxCommandBufferTextureBarrier(cmdBuffer, depthTexture, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, 0, 0, true);
+    agfxCommandBufferTextureBarrier(cmdBuffer, shadowTexture, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, 0, 0, true);
+    agfxCommandBufferTextureBarrier(cmdBuffer, reflTexture, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, AGFX_RESOURCE_STATE_UNORDERED_ACCESS, 0, 0, true);
+
+    reflections->Generate(device, cmdBuffer, scene.tlas, scene.gpuSceneBufferView, scene.indexBufferView, scene.vertexBufferView,
+                           albedoView, normalView, mraView, depthView,
+                           reflUAVView, reflTexture,
+                           reflectionSceneCBView[frameSlot], shadowArrayView, cascadeCBView[frameSlot],
+                           pointSampler, scene.defaultSampler, shadowComparisonSampler, pointSampler,
+                           reflectionSettings.metallicThreshold, reflectionSettings.roughnessThreshold,
+                           width, height);
+
+    agfxCommandBufferTextureBarrier(cmdBuffer, reflTexture, AGFX_RESOURCE_STATE_UNORDERED_ACCESS, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, 0, 0, true);
+    agfxCommandBufferTextureBarrier(cmdBuffer, albedoTexture, AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, 0, 0, true);
+    agfxCommandBufferTextureBarrier(cmdBuffer, normalTexture, AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, 0, 0, true);
+    agfxCommandBufferTextureBarrier(cmdBuffer, mraTexture, AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, 0, 0, true);
+    agfxCommandBufferTextureBarrier(cmdBuffer, depthTexture, AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, 0, 0, true);
+    agfxCommandBufferTextureBarrier(cmdBuffer, shadowTexture, AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, 0, 0, true);
+}
+
 void DeferredRenderer::RenderLighting(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const LightSettings& light, const Camera& camera, uint32_t frameSlot)
 {
     agfxCommandBufferTextureBarrier(cmdBuffer, hdrTexture, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, AGFX_RESOURCE_STATE_RENDER_TARGET, 0, 0, true);
@@ -714,6 +808,8 @@ void DeferredRenderer::RenderLighting(agfxDevice* device, agfxCommandBuffer* cmd
     pc.shadowComparisonSampler = (uint32_t)agfxSamplerGetHandle(shadowComparisonSampler);
     pc.pointSampler = (uint32_t)agfxSamplerGetHandle(pointSampler);
     pc.aoTex = (uint32_t)agfxTextureViewGetHandle(aoView);
+    pc.reflTex = (uint32_t)agfxTextureViewGetHandle(reflView);
+    pc.reflectionsEnabled = reflectionsRanThisFrame ? 1u : 0u;
     agfxRenderPassPushConstants(pass, &pc, sizeof(pc));
 
     agfxRenderPassDraw(pass, 3, 1, 0, 0);

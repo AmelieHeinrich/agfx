@@ -98,6 +98,17 @@ int ImageIndex(const cgltf_data* data, const cgltf_image* image)
     return (int)(image - data->images);
 }
 
+// Row-major 3x4 transform expected by agfxAccelerationStructureInstance from a
+// column-major glm::mat4.
+void WriteRowMajor3x4(const glm::mat4& m, float out[12])
+{
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            out[row * 4 + col] = m[col][row];
+        }
+    }
+}
+
 agfxTexture* CreateSolidTexture(agfxDevice* device, AgfxUploader& uploader, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
 {
     uint8_t pixels[4] = {r, g, b, a};
@@ -350,11 +361,53 @@ bool GltfScene::Load(agfxDevice* device, agfxCommandQueue* queue, const char* pa
     agfxBufferCreateInfo ibInfo = {};
     ibInfo.size = allIndices.size() * sizeof(uint32_t);
     ibInfo.stride = sizeof(uint32_t);
-    ibInfo.usage = AGFX_BUFFER_USAGE_INDEX;
+    ibInfo.usage = (agfxBufferUsage)(AGFX_BUFFER_USAGE_INDEX | AGFX_BUFFER_USAGE_SHADER_READ);
     ibInfo.memoryType = AGFX_BUFFER_MEMORY_TYPE_GPU_ONLY;
     indexBuffer = agfxBufferCreate(device, &ibInfo);
     agfxBufferSetName(indexBuffer, "Scene Index Buffer");
     uploader.UploadBuffer(device, indexBuffer, 0, allIndices.data(), ibInfo.size);
+
+    agfxBufferViewCreateInfo ibViewInfo = {};
+    ibViewInfo.buffer = indexBuffer;
+    ibViewInfo.type = AGFX_BUFFER_VIEW_TYPE_STRUCTURED;
+    indexBufferView = agfxBufferViewCreate(device, &ibViewInfo);
+
+    // GPUScene: one entry per primitive, resolving material/geometry data for the
+    // raytraced reflections pass (indexed by TLAS instance userID = primitive index).
+    std::vector<GPUSceneInstance> gpuSceneInstances(primitives.size());
+    for (size_t i = 0; i < primitives.size(); ++i) {
+        const ScenePrimitive& prim = primitives[i];
+        GPUSceneInstance& inst = gpuSceneInstances[i];
+        inst.worldMatrix = prim.worldMatrix;
+        inst.vertexOffset = prim.vertexOffset;
+        inst.indexOffset = prim.indexOffset;
+        if (prim.materialIndex >= 0 && prim.materialIndex < (int)materials.size()) {
+            const SceneMaterial& mat = materials[prim.materialIndex];
+            inst.albedoTex = textures[mat.albedoTexIndex].handle;
+            inst.normalTex = textures[mat.normalTexIndex].handle;
+            inst.metallicRoughnessTex = textures[mat.metallicRoughnessTexIndex].handle;
+            inst.metallicFactor = mat.metallicFactor;
+            inst.roughnessFactor = mat.roughnessFactor;
+        } else {
+            inst.albedoTex = textures[whiteTexIndex].handle;
+            inst.normalTex = textures[flatNormalTexIndex].handle;
+            inst.metallicRoughnessTex = textures[whiteTexIndex].handle;
+        }
+    }
+
+    agfxBufferCreateInfo gpuSceneInfo = {};
+    gpuSceneInfo.size = gpuSceneInstances.size() * sizeof(GPUSceneInstance);
+    gpuSceneInfo.stride = sizeof(GPUSceneInstance);
+    gpuSceneInfo.usage = AGFX_BUFFER_USAGE_SHADER_READ;
+    gpuSceneInfo.memoryType = AGFX_BUFFER_MEMORY_TYPE_GPU_ONLY;
+    gpuSceneBuffer = agfxBufferCreate(device, &gpuSceneInfo);
+    agfxBufferSetName(gpuSceneBuffer, "GPU Scene Buffer");
+    uploader.UploadBuffer(device, gpuSceneBuffer, 0, gpuSceneInstances.data(), gpuSceneInfo.size);
+
+    agfxBufferViewCreateInfo gpuSceneViewInfo = {};
+    gpuSceneViewInfo.buffer = gpuSceneBuffer;
+    gpuSceneViewInfo.type = AGFX_BUFFER_VIEW_TYPE_STRUCTURED;
+    gpuSceneBufferView = agfxBufferViewCreate(device, &gpuSceneViewInfo);
 
     agfxSamplerCreateInfo samplerInfo = {};
     samplerInfo.filter = AGFX_SAMPLER_FILTER_LINEAR;
@@ -399,6 +452,115 @@ bool GltfScene::Load(agfxDevice* device, agfxCommandQueue* queue, const char* pa
 
     agfxDeviceMakeResourcesResident(device);
 
+    // Skip all acceleration-structure work on devices without ray tracing; tlas stays
+    // null and the reflections pass early-outs on it.
+    agfxDeviceInfo deviceInfo = {};
+    agfxDeviceGetInfo(device, &deviceInfo);
+    if (!deviceInfo.supportsRayTracing) {
+        return true;
+    }
+
+    // Build BLAS (one per primitive, geometry taken directly from the shared
+    // vertex/index buffers via the primitive's offsets) and a single TLAS for the
+    // whole (static) scene. userID = primitive index, used by the reflections
+    // shader to index into the GPUScene buffer at hit time.
+    blas.resize(primitives.size());
+    for (size_t i = 0; i < primitives.size(); ++i) {
+        const ScenePrimitive& prim = primitives[i];
+
+        agfxAccelerationStructureGeometry geometry = {};
+        geometry.type = AGFX_ACCELERATION_STRUCTURE_GEOMETRY_TYPE_TRIANGLES;
+        geometry.opaque = true;
+        geometry.triangles.vertexBuffer = vertexBuffer;
+        geometry.triangles.vertexOffset = prim.vertexOffset * (uint32_t)sizeof(SceneVertex);
+        geometry.triangles.vertexCount = prim.vertexCount;
+        geometry.triangles.indexBuffer = indexBuffer;
+        geometry.triangles.indexOffset = prim.indexOffset * (uint32_t)sizeof(uint32_t);
+        geometry.triangles.indexCount = prim.indexCount;
+
+        agfxAccelerationStructureCreateInfo blasInfo = {};
+        blasInfo.type = AGFX_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        blasInfo.bottomLevel.geometries = &geometry;
+        blasInfo.bottomLevel.geometryCount = 1;
+        blasInfo.name = "Primitive BLAS";
+        blas[i] = agfxAccelerationStructureCreate(device, &blasInfo);
+    }
+
+    agfxAccelerationStructureCreateInfo tlasInfo = {};
+    tlasInfo.type = AGFX_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+    tlasInfo.topLevel.maxInstanceCount = (uint32_t)primitives.size();
+    tlasInfo.name = "Scene TLAS";
+    tlas = agfxAccelerationStructureCreate(device, &tlasInfo);
+
+    uint64_t maxScratchSize = 0;
+    for (agfxAccelerationStructure* b : blas) {
+        agfxAccelerationStructureSizes sizes = {};
+        agfxAccelerationStructureGetSizes(device, b, &sizes);
+        maxScratchSize = std::max(maxScratchSize, sizes.scratchBufferSize);
+    }
+    {
+        agfxAccelerationStructureSizes sizes = {};
+        agfxAccelerationStructureGetSizes(device, tlas, &sizes);
+        maxScratchSize = std::max(maxScratchSize, sizes.scratchBufferSize);
+    }
+
+    agfxBufferCreateInfo scratchInfo = {};
+    scratchInfo.size = maxScratchSize;
+    scratchInfo.stride = 4;
+    scratchInfo.usage = AGFX_BUFFER_USAGE_SHADER_WRITE;
+    scratchInfo.memoryType = AGFX_BUFFER_MEMORY_TYPE_GPU_ONLY;
+    agfxBuffer* scratchBuffer = agfxBufferCreate(device, &scratchInfo);
+    agfxBufferSetName(scratchBuffer, "AS Build Scratch Buffer");
+
+    // The BLAS/TLAS and scratch buffer were added to the residency set after the
+    // earlier commit, so re-commit before the GPU build references them.
+    agfxDeviceMakeResourcesResident(device);
+
+    agfxCommandBuffer* asCmdBuffer = agfxCommandBufferCreate(device, queue);
+    agfxFence* asFence = agfxFenceCreate(device);
+
+    agfxCommandBufferReset(asCmdBuffer);
+    agfxCommandBufferBegin(asCmdBuffer);
+
+    for (agfxAccelerationStructure* b : blas) {
+        agfxComputePass* pass = agfxComputePassBegin(asCmdBuffer, "Build BLAS");
+        agfxComputePassBuildAccelerationStructure(pass, b, scratchBuffer, 0);
+        agfxComputePassEnd(pass);
+        // All builds share one scratch buffer, and the TLAS build consumes these
+        // BLAS. Emit a real AS->AS barrier (producer stage MTLStageAccelerationStructure)
+        // so each build serializes against the next; a COMMON source is dropped by the
+        // barrier tracker (producer stage 0) and leaves the builds racing -> GPU hang.
+        agfxCommandBufferAccelerationStructureBarrier(asCmdBuffer, b, AGFX_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, AGFX_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, true);
+    }
+
+    std::vector<agfxAccelerationStructureInstance> instances(primitives.size());
+    for (size_t i = 0; i < primitives.size(); ++i) {
+        agfxAccelerationStructureInstance& inst = instances[i];
+        inst.blas = blas[i];
+        WriteRowMajor3x4(primitives[i].worldMatrix, inst.transform);
+        inst.userID = (uint32_t)i;
+        inst.opaque = true;
+    }
+    agfxAccelerationStructureAddInstances(tlas, instances.data(), (uint32_t)instances.size());
+
+    {
+        agfxComputePass* pass = agfxComputePassBegin(asCmdBuffer, "Build TLAS");
+        agfxComputePassBuildAccelerationStructure(pass, tlas, scratchBuffer, 0);
+        agfxComputePassEnd(pass);
+    }
+    agfxCommandBufferAccelerationStructureBarrier(asCmdBuffer, tlas, AGFX_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, AGFX_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, true);
+
+    agfxCommandBufferEnd(asCmdBuffer);
+    agfxCommandQueueSubmit(queue, &asCmdBuffer, 1);
+    agfxCommandQueueSignal(queue, asFence, 1);
+    agfxFenceWait(asFence, 1, UINT64_MAX);
+
+    agfxFenceDestroy(device, asFence);
+    agfxCommandBufferDestroy(device, asCmdBuffer);
+    agfxBufferDestroy(device, scratchBuffer);
+
+    tlasHandle = (uint32_t)agfxAccelerationStructureGetHandle(tlas);
+
     return true;
 }
 
@@ -410,8 +572,18 @@ void GltfScene::Destroy(agfxDevice* device)
     }
     textures.clear();
 
+    if (tlas) agfxAccelerationStructureDestroy(device, tlas);
+    for (agfxAccelerationStructure* b : blas) {
+        agfxAccelerationStructureDestroy(device, b);
+    }
+    blas.clear();
+
+    if (gpuSceneBufferView) agfxBufferViewDestroy(device, gpuSceneBufferView);
+    if (gpuSceneBuffer) agfxBufferDestroy(device, gpuSceneBuffer);
+
     if (defaultSampler) agfxSamplerDestroy(device, defaultSampler);
     if (vertexBufferView) agfxBufferViewDestroy(device, vertexBufferView);
     if (vertexBuffer) agfxBufferDestroy(device, vertexBuffer);
+    if (indexBufferView) agfxBufferViewDestroy(device, indexBufferView);
     if (indexBuffer) agfxBufferDestroy(device, indexBuffer);
 }

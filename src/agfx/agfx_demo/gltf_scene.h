@@ -41,6 +41,22 @@ struct SceneTexture {
     uint32_t handle = 0;
 };
 
+// One entry per ScenePrimitive - the "GPUScene" instance array consumed by the
+// raytraced reflections pass to resolve material/geometry data at a ray hit
+// (indexed by RayQuery::CommittedInstanceID(), which equals the TLAS instance's
+// userID, which equals the primitive's index into this array).
+struct GPUSceneInstance {
+    glm::mat4 worldMatrix = glm::mat4(1.0f);
+    uint32_t vertexOffset = 0;
+    uint32_t indexOffset = 0;
+    uint32_t albedoTex = 0;
+    uint32_t normalTex = 0;
+    uint32_t metallicRoughnessTex = 0;
+    float metallicFactor = 1.0f;
+    float roughnessFactor = 1.0f;
+    float _pad0 = 0.0f;
+};
+
 class GltfScene {
 public:
     std::vector<ScenePrimitive> primitives;
@@ -50,7 +66,18 @@ public:
     agfxBuffer* vertexBuffer = nullptr;
     agfxBufferView* vertexBufferView = nullptr;
     agfxBuffer* indexBuffer = nullptr;
+    agfxBufferView* indexBufferView = nullptr;
     agfxSampler* defaultSampler = nullptr;
+
+    // Raytracing acceleration structures - one BLAS per primitive, one TLAS for
+    // the whole scene (static, built once at load time).
+    std::vector<agfxAccelerationStructure*> blas;
+    agfxAccelerationStructure* tlas = nullptr;
+    uint32_t tlasHandle = 0;
+
+    // GPUScene: flat per-instance array, uploaded once at load time.
+    agfxBuffer* gpuSceneBuffer = nullptr;
+    agfxBufferView* gpuSceneBufferView = nullptr;
 
     bool Load(agfxDevice* device, agfxCommandQueue* queue, const char* path);
 

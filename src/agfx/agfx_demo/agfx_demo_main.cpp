@@ -90,6 +90,10 @@ int main()
     deviceCreateInfo.enableValidation = true;
     agfxDevice* device = agfxDeviceCreate(&deviceCreateInfo);
 
+    agfxDeviceInfo deviceInfo = {};
+    agfxDeviceGetInfo(device, &deviceInfo);
+    const bool supportsRayTracing = deviceInfo.supportsRayTracing != 0;
+
     agfxCommandQueueCreateInfo queueCreateInfo = {};
     queueCreateInfo.type = AGFX_COMMAND_QUEUE_TYPE_GRAPHICS;
     agfxCommandQueue* queue = agfxCommandQueueCreate(device, &queueCreateInfo);
@@ -237,6 +241,17 @@ int main()
             ImGui::SliderFloat("Bias", &renderer.ssaoSettings.bias, 0.0f, 0.1f);
             ImGui::SliderFloat("Power", &renderer.ssaoSettings.power, 0.5f, 4.0f);
             ImGui::Separator();
+            ImGui::Text("Raytraced Reflections");
+            if (supportsRayTracing) {
+                ImGui::Checkbox("Enabled##Reflections", &renderer.reflectionSettings.enabled);
+                ImGui::BeginDisabled(!renderer.reflectionSettings.enabled);
+                ImGui::SliderFloat("Metallic Threshold", &renderer.reflectionSettings.metallicThreshold, 0.0f, 1.0f);
+                ImGui::SliderFloat("Roughness Threshold", &renderer.reflectionSettings.roughnessThreshold, 0.0f, 0.5f);
+                ImGui::EndDisabled();
+            } else {
+                ImGui::TextDisabled("Ray tracing not supported on this device");
+            }
+            ImGui::Separator();
             ImGui::Text("Hold Right Mouse Button to look around");
             ImGui::Text("WASD to move, Shift to sprint, Q/E for down/up");
             ImGui::End();
@@ -286,6 +301,10 @@ int main()
 
             profiler.BeginScope(commandBuffer, "Shadows");
             renderer.RenderShadows(device, commandBuffer, scene, camera, light, frameSlot);
+            profiler.EndScope(commandBuffer);
+
+            profiler.BeginScope(commandBuffer, "Reflections");
+            renderer.RenderReflections(device, commandBuffer, scene, camera, light, frameSlot);
             profiler.EndScope(commandBuffer);
 
             profiler.BeginScope(commandBuffer, "Lighting");

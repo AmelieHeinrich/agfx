@@ -258,7 +258,7 @@ struct agfxMetalBindlessManager {
         allocation.resourceID = {};
 
         IRDescriptorTableEntry* entry = (IRDescriptorTableEntry*)resourceHeapBuffer.contents;
-        entry->gpuVA = accelerationStructure->resourceIDBuffer.gpuAddress;
+        entry[slotIndex].gpuVA = accelerationStructure->resourceIDBuffer.gpuAddress;
         return allocation;
     }
 
@@ -1252,19 +1252,25 @@ agfxAccelerationStructure* agfxAccelerationStructureCreate(agfxDevice* device, c
         for (uint32_t i = 0; i < createInfo->bottomLevel.geometryCount; i++) {
             agfxAccelerationStructureGeometry* geometry = &createInfo->bottomLevel.geometries[i];
             if (geometry->type == AGFX_ACCELERATION_STRUCTURE_GEOMETRY_TYPE_TRIANGLES) {
+                uint64_t vertexStride = geometry->triangles.vertexBuffer->createInfo.stride;
+                uint64_t indexStride = geometry->triangles.indexBuffer->createInfo.stride;
+
                 MTL4AccelerationStructureTriangleGeometryDescriptor* geometryDescriptor = [[MTL4AccelerationStructureTriangleGeometryDescriptor alloc] init];
-                geometryDescriptor.vertexBuffer = geometry->triangles.vertexBuffer->buffer.gpuAddress + geometry->triangles.vertexOffset;
-                geometryDescriptor.vertexStride = geometry->triangles.vertexBuffer->createInfo.stride;
+                geometryDescriptor.vertexBuffer = MTL4BufferRangeMake(geometry->triangles.vertexBuffer->buffer.gpuAddress + geometry->triangles.vertexOffset,
+                                                                      geometry->triangles.vertexCount * vertexStride);
+                geometryDescriptor.vertexStride = vertexStride;
                 geometryDescriptor.vertexFormat = MTLAttributeFormatFloat3;
-                geometryDescriptor.indexBuffer = geometry->triangles.indexBuffer->buffer.gpuAddress + geometry->triangles.indexOffset;
-                geometryDescriptor.indexType = geometry->triangles.indexBuffer->createInfo.stride == 4 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
+                geometryDescriptor.indexBuffer = MTL4BufferRangeMake(geometry->triangles.indexBuffer->buffer.gpuAddress + geometry->triangles.indexOffset,
+                                                                     geometry->triangles.indexCount * indexStride);
+                geometryDescriptor.indexType = indexStride == 4 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16;
                 geometryDescriptor.triangleCount = geometry->triangles.indexCount / 3;
                 geometryDescriptor.opaque = geometry->opaque ? YES : NO;
 
                 [geometries addObject:geometryDescriptor];
             } else {
                 MTL4AccelerationStructureBoundingBoxGeometryDescriptor* geometryDescriptor = [[MTL4AccelerationStructureBoundingBoxGeometryDescriptor alloc] init];
-                geometryDescriptor.boundingBoxBuffer = geometry->aabbs.aabbBuffer->buffer.gpuAddress + geometry->aabbs.aabbOffset;
+                geometryDescriptor.boundingBoxBuffer = MTL4BufferRangeMake(geometry->aabbs.aabbBuffer->buffer.gpuAddress + geometry->aabbs.aabbOffset,
+                                                                           geometry->aabbs.aabbCount * geometry->aabbs.aabbStride);
                 geometryDescriptor.boundingBoxCount = geometry->aabbs.aabbCount;
                 geometryDescriptor.boundingBoxStride = geometry->aabbs.aabbStride;
                 geometryDescriptor.opaque = geometry->opaque ? YES : NO;
@@ -1296,6 +1302,10 @@ agfxAccelerationStructure* agfxAccelerationStructureCreate(agfxDevice* device, c
         accelerationStructure->instanceBuffer = [device->device newBufferWithLength:createInfo->topLevel.maxInstanceCount * sizeof(MTLIndirectAccelerationStructureInstanceDescriptor) options:MTLResourceStorageModeShared];
         accelerationStructure->mappedInstanceBuffer = (MTLIndirectAccelerationStructureInstanceDescriptor*)accelerationStructure->instanceBuffer.contents;
         [device->residencySet addAllocation:accelerationStructure->instanceBuffer];
+
+        asDesc.instanceDescriptorType = MTLAccelerationStructureInstanceDescriptorTypeIndirect;
+        asDesc.instanceDescriptorStride = sizeof(MTLIndirectAccelerationStructureInstanceDescriptor);
+        asDesc.instanceDescriptorBuffer = MTL4BufferRangeMake(accelerationStructure->instanceBuffer.gpuAddress, accelerationStructure->instanceBuffer.length);
 
         accelerationStructure->resourceIDBuffer = [device->device newBufferWithLength:sizeof(uint64_t) options:MTLResourceStorageModeShared];
         accelerationStructure->mappedResourceIDBuffer = (uint64_t*)accelerationStructure->resourceIDBuffer.contents;
@@ -1347,12 +1357,19 @@ void agfxAccelerationStructureAddInstances(agfxAccelerationStructure* accelerati
     for (uint32_t i = 0; i < instanceCount; ++i) {
         const agfxAccelerationStructureInstance* instance = &instances[i];
 
-        MTLIndirectAccelerationStructureInstanceDescriptor& mtlInstance = accelerationStructure->mappedInstanceBuffer[accelerationStructure->currentInstanceCount + i];
-        mtlInstance.accelerationStructureID = instance->blas->accelerationStructure.gpuResourceID;
-        memcpy(&mtlInstance.transformationMatrix, instance->transform, sizeof(float) * 12);
-        mtlInstance.options = instance->opaque ? MTLAccelerationStructureInstanceOptionOpaque :  MTLAccelerationStructureInstanceOptionNonOpaque;
-        mtlInstance.mask = 0xFF;
-        mtlInstance.userID = instance->userID;
+        MTLIndirectAccelerationStructureInstanceDescriptor* mtlInstance = &accelerationStructure->mappedInstanceBuffer[accelerationStructure->currentInstanceCount + i];
+        mtlInstance->accelerationStructureID = instance->blas->accelerationStructure.gpuResourceID;
+        // AGFX transform is row-major 3x4 (transform[row*4+col]); MTLPackedFloat4x3 is
+        // column-major (columns[col][row]). A straight memcpy transposes the matrix and
+        // flings the instance to a garbage world position, so unpack it explicitly.
+        for (int col = 0; col < 4; ++col) {
+            mtlInstance->transformationMatrix.columns[col][0] = instance->transform[0 * 4 + col];
+            mtlInstance->transformationMatrix.columns[col][1] = instance->transform[1 * 4 + col];
+            mtlInstance->transformationMatrix.columns[col][2] = instance->transform[2 * 4 + col];
+        }
+        mtlInstance->options = instance->opaque ? MTLAccelerationStructureInstanceOptionOpaque :  MTLAccelerationStructureInstanceOptionNonOpaque;
+        mtlInstance->mask = 0xFF;
+        mtlInstance->userID = instance->userID;
     }
     accelerationStructure->currentInstanceCount += instanceCount;
 }
@@ -1376,7 +1393,7 @@ MTLTextureType agfxTextureTypeToMTL(agfxTextureType type) {
 }
 
 MTLTextureUsage agfxTextureUsageToMTL(agfxTextureUsage usage) {
-    MTLTextureUsage mtlUsage = 0;
+    MTLTextureUsage mtlUsage = MTLTextureUsagePixelFormatView;
     if (usage & AGFX_TEXTURE_USAGE_SAMPLED) mtlUsage |= MTLTextureUsageShaderRead;
     if (usage & AGFX_TEXTURE_USAGE_STORAGE) mtlUsage |= MTLTextureUsageShaderWrite;
     if (usage & AGFX_TEXTURE_USAGE_COLOR_ATTACHMENT) mtlUsage |= MTLTextureUsageRenderTarget;

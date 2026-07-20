@@ -13,12 +13,20 @@
 #include "camera.h"
 #include "csm.h"
 #include "ssao.h"
+#include "reflections.h"
 
 struct SSAOSettings {
     bool enabled = true;
     float radius = 0.5f;
     float bias = 0.025f;
     float power = 1.5f;
+};
+
+struct ReflectionSettings {
+    bool enabled = true;
+    // Strict mirror gate: only near-perfect metallic mirrors get traced.
+    float metallicThreshold = 0.95f;
+    float roughnessThreshold = 0.06f;
 };
 
 struct LightSettings {
@@ -44,6 +52,7 @@ public:
     void RenderGBuffer(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const GltfScene& scene, const Camera& camera, uint32_t frameSlot);
     void RenderSSAO(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const Camera& camera, uint32_t frameSlot);
     void RenderShadows(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const GltfScene& scene, const Camera& camera, const LightSettings& light, uint32_t frameSlot);
+    void RenderReflections(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const GltfScene& scene, const Camera& camera, const LightSettings& light, uint32_t frameSlot);
     void RenderLighting(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const LightSettings& light, const Camera& camera, uint32_t frameSlot);
     void RenderTonemap(agfxDevice* device, agfxRenderPass* backbufferPass, bool isHDR);
 
@@ -79,6 +88,14 @@ public:
     agfxTexture* aoTexture = nullptr;
     agfxTextureView* aoView = nullptr; // sampled view (lighting pass)
     agfxTextureView* aoUAVView = nullptr; // writeable view (SSAO compute pass)
+
+    // Raytraced mirror reflections (compute)
+    ReflectionSettings reflectionSettings;
+    bool reflectionsRanThisFrame = false;
+    AgfxReflections* reflections = nullptr;
+    agfxTexture* reflTexture = nullptr;
+    agfxTextureView* reflView = nullptr; // sampled view (lighting pass)
+    agfxTextureView* reflUAVView = nullptr; // writeable view (reflections compute pass)
 
     // Shadows (CSM + PCSS)
     CSMSettings csm;
@@ -117,6 +134,8 @@ public:
     agfxBufferView* cascadeCBView[kFramesInFlight] = {};
     agfxBuffer* ssaoSceneCB[kFramesInFlight] = {};
     agfxBufferView* ssaoSceneCBView[kFramesInFlight] = {};
+    agfxBuffer* reflectionSceneCB[kFramesInFlight] = {};
+    agfxBufferView* reflectionSceneCBView[kFramesInFlight] = {};
 
 private:
     void CreateGBufferTargets(agfxDevice* device, uint32_t width, uint32_t height);
