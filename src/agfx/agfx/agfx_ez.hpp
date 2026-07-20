@@ -466,6 +466,12 @@ namespace agfx::ez
         agfx::ShaderModule* fragmentShader = nullptr;
         agfx::ShaderModule* taskShader = nullptr;
         agfx::ShaderModule* meshShader = nullptr;
+        // Thread-group sizes for meshShader/taskShader, required on the Metal backend for dispatch.
+        // Not reflected by ez -- copy from agfxShaderCompilerResult::meshSizeX/Y/Z (taskSizeX/Y/Z)
+        // returned by agfxCompileShader when compiling the mesh/task shader; must match the
+        // shader's declared [numthreads(...)] or dispatch counts disagree between backends.
+        uint32_t meshGroupSizeX = 1, meshGroupSizeY = 1, meshGroupSizeZ = 1;
+        uint32_t taskGroupSizeX = 1, taskGroupSizeY = 1, taskGroupSizeZ = 1;
 
         agfxFillMode fillMode = AGFX_FILL_MODE_SOLID;
         agfxCullMode cullMode = AGFX_CULL_MODE_BACK;
@@ -508,6 +514,12 @@ namespace agfx::ez
                 hash = FnvHashValue(hash, desc.fragmentShader);
                 hash = FnvHashValue(hash, desc.taskShader);
                 hash = FnvHashValue(hash, desc.meshShader);
+                hash = FnvHashValue(hash, desc.meshGroupSizeX);
+                hash = FnvHashValue(hash, desc.meshGroupSizeY);
+                hash = FnvHashValue(hash, desc.meshGroupSizeZ);
+                hash = FnvHashValue(hash, desc.taskGroupSizeX);
+                hash = FnvHashValue(hash, desc.taskGroupSizeY);
+                hash = FnvHashValue(hash, desc.taskGroupSizeZ);
                 hash = FnvHash(hash, colorFormats, sizeof(agfxTextureFormat) * colorCount);
                 hash = FnvHashValue(hash, colorCount);
                 hash = FnvHashValue(hash, hasDepth ? depthFormat : AGFX_TEXTURE_FORMAT_UNKNOWN);
@@ -544,8 +556,14 @@ namespace agfx::ez
                        "PipelineDesc: set exactly one of vertexShader (classic) or meshShader (mesh shading)");
                 if (desc.meshShader) {
                     info.meshShader = *desc.meshShader;
+                    info.meshGroupSizeX = desc.meshGroupSizeX;
+                    info.meshGroupSizeY = desc.meshGroupSizeY;
+                    info.meshGroupSizeZ = desc.meshGroupSizeZ;
                     if (desc.taskShader) {
                         info.taskShader = *desc.taskShader;
+                        info.taskGroupSizeX = desc.taskGroupSizeX;
+                        info.taskGroupSizeY = desc.taskGroupSizeY;
+                        info.taskGroupSizeZ = desc.taskGroupSizeZ;
                     }
                 } else {
                     info.vertexShader = *desc.vertexShader;
