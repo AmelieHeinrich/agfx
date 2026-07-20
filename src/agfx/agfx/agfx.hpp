@@ -187,6 +187,33 @@ namespace agfx
         using Handle::Handle;
     };
 
+    /// @brief Owns an agfxAccelerationStructure (bottom- or top-level). Build/update/copy it
+    /// through the corresponding ComputePass methods; sample it in shaders via GetHandle().
+    class AccelerationStructure : public Handle<agfxAccelerationStructure, agfxAccelerationStructureDestroy>
+    {
+    public:
+        using Handle::Handle;
+
+        agfxAccelerationStructureSizes GetSizes() const
+        {
+            agfxAccelerationStructureSizes sizes{};
+            agfxAccelerationStructureGetSizes(mDevice, mHandle, &sizes);
+            return sizes;
+        }
+
+        /// @brief Bindless descriptor handle; write this into a push constant to trace against it.
+        uint64_t GetHandle() const { return agfxAccelerationStructureGetHandle(mHandle); }
+
+        /// @brief Appends instances to a top-level acceleration structure (call before building it).
+        void AddInstances(const agfxAccelerationStructureInstance* instances, uint32_t instanceCount)
+        {
+            agfxAccelerationStructureAddInstances(mHandle, instances, instanceCount);
+        }
+
+        /// @brief Clears all previously-added instances from a top-level acceleration structure.
+        void ResetInstances() { agfxAccelerationStructureResetInstances(mHandle); }
+    };
+
     class ShaderModule : public Handle<agfxShaderModule, agfxShaderModuleDestroy>
     {
     public:
@@ -257,6 +284,35 @@ namespace agfx
         void PushConstants(const void* data, uint32_t size) { agfxComputePassPushConstants(mPass, data, size); }
         template<typename T> void PushConstants(const T& data) { PushConstants(&data, sizeof(T)); }
         void Dispatch(uint32_t x, uint32_t y, uint32_t z) { agfxComputePassDispatch(mPass, x, y, z); }
+
+        /// @brief Builds a bottom- or top-level acceleration structure into its final storage.
+        void BuildAccelerationStructure(AccelerationStructure& as, Buffer& scratchBuffer, uint64_t scratchBufferOffset = 0)
+        {
+            agfxComputePassBuildAccelerationStructure(mPass, as, scratchBuffer, scratchBufferOffset);
+        }
+
+        /// @brief Refits an acceleration structure in place (requires allowUpdate at creation).
+        void UpdateAccelerationStructure(AccelerationStructure& src, AccelerationStructure& dst, Buffer& scratchBuffer, uint64_t scratchBufferOffset = 0)
+        {
+            agfxComputePassUpdateAccelerationStructure(mPass, src, dst, scratchBuffer, scratchBufferOffset);
+        }
+
+        void CopyAccelerationStructure(AccelerationStructure& src, AccelerationStructure& dst)
+        {
+            agfxComputePassCopyAccelerationStructure(mPass, src, dst);
+        }
+
+        /// @brief Compacts a built acceleration structure into a smaller destination (created via CreateAccelerationStructureCompacted).
+        void CompactAccelerationStructure(AccelerationStructure& src, AccelerationStructure& dst)
+        {
+            agfxComputePassCompactAccelerationStructure(mPass, src, dst);
+        }
+
+        /// @brief Writes the compacted size of a built acceleration structure into a buffer for later readback.
+        void WriteCompactedSizeToBuffer(AccelerationStructure& as, Buffer& dstBuffer, uint64_t dstBufferOffset = 0)
+        {
+            agfxComputePassWriteCompactedSizeToBuffer(mPass, as, dstBuffer, dstBufferOffset);
+        }
 
         operator agfxComputePass*() const { return mPass; }
 
@@ -337,6 +393,11 @@ namespace agfx
         void BufferBarrier(Buffer& buffer, agfxResourceState oldState, agfxResourceState newState, bool agglomerate = true)
         {
             agfxCommandBufferBufferBarrier(mHandle, buffer, oldState, newState, agglomerate);
+        }
+
+        void AccelerationStructureBarrier(AccelerationStructure& as, agfxResourceState oldState, agfxResourceState newState, bool agglomerate = true)
+        {
+            agfxCommandBufferAccelerationStructureBarrier(mHandle, as, oldState, newState, agglomerate);
         }
 
         void WriteTimestamp(QueryPool& pool, uint32_t index) { agfxCommandBufferWriteTimestamp(mHandle, pool, index); }
@@ -510,6 +571,18 @@ namespace agfx
         ComputePipeline CreateComputePipeline(const agfxComputePipelineCreateInfo& info)
         {
             return ComputePipeline(mDevice, agfxComputePipelineCreate(mDevice, &info));
+        }
+
+        AccelerationStructure CreateAccelerationStructure(const agfxAccelerationStructureCreateInfo& info)
+        {
+            return AccelerationStructure(mDevice, agfxAccelerationStructureCreate(mDevice, &info));
+        }
+
+        /// @brief Creates a destination acceleration structure sized for a compaction pass.
+        /// @param compactedSize The size read back after WriteCompactedSizeToBuffer on the source.
+        AccelerationStructure CreateAccelerationStructureCompacted(const agfxAccelerationStructureCreateInfo& info, uint64_t compactedSize)
+        {
+            return AccelerationStructure(mDevice, agfxAccelerationStructureCreateCompacted(mDevice, &info, compactedSize));
         }
 
     private:

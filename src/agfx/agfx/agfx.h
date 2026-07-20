@@ -70,6 +70,9 @@ typedef struct agfxRenderPipeline agfxRenderPipeline;
 /// @brief A compute pipeline object. Represents a compute pipeline for compute operations.
 typedef struct agfxComputePipeline agfxComputePipeline;
 
+/// @brief A raytracing acceleration structure object. Represents a GPU acceleration structure for raytracing operations.
+typedef struct agfxAccelerationStructure agfxAccelerationStructure;
+
 /// @brief A structure containing information for creating an agfxDevice.
 typedef struct agfxDeviceCreateInfo {
     /// @brief The allocation function to use for device memory allocations.
@@ -324,6 +327,14 @@ void agfxCommandBufferTextureBarrier(agfxCommandBuffer* commandBuffer, agfxTextu
 ///        queued and flushed at the next pass boundary; D3D12 ignores this flag and always transitions immediately.
 void agfxCommandBufferBufferBarrier(agfxCommandBuffer* commandBuffer, agfxBuffer* buffer, agfxResourceState oldState, agfxResourceState newState, agfxBool agglomerate);
 
+/// @brief Records a barrier transitioning the given acceleration structure from one resource state to another.
+/// @param commandBuffer A pointer to the agfxCommandBuffer to record the barrier in.
+/// @param accelerationStructure A pointer to the agfxAccelerationStructure to transition.
+/// @param oldState The resource state the acceleration structure is currently in.
+/// @param newState The resource state to transition the acceleration structure to.
+/// @param agglomerate See the note on agfxCommandBufferTextureBarrier: on Metal, pass true so the barrier is queued and flushed at the next pass boundary; D3D12 ignores this flag and always transitions immediately.
+void agfxCommandBufferAccelerationStructureBarrier(agfxCommandBuffer* commandBuffer, agfxAccelerationStructure* accelerationStructure, agfxResourceState oldState, agfxResourceState newState, agfxBool agglomerate);
+
 // Texture
 /// @brief The pixel format of a texture.
 /// @note BCn formats require desktop/BC-texture-compression support (D3D12; Metal via supportsBCTextureCompression).
@@ -448,6 +459,144 @@ typedef struct agfxTextureCreateInfo {
     uint32_t mipLevels;
 } agfxTextureCreateInfo;
 
+/// @brief An enum describing a type of acceleration structure
+typedef enum agfxAccelerationStructureType {
+    /// @brief Contains acceleration structure instances
+    AGFX_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL,
+    /// @brief Contains geometry (triangles or AABBs)
+    AGFX_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL
+} agfxAccelerationStructureType;
+
+/// @brief An enum describing a type of geometry in a bottom-level acceleration structure
+typedef enum agfxAccelerationStructureGeometryType {
+    /// @brief Contains triangle geometry
+    AGFX_ACCELERATION_STRUCTURE_GEOMETRY_TYPE_TRIANGLES,
+    /// @brief Contains axis-aligned bounding box geometry
+    AGFX_ACCELERATION_STRUCTURE_GEOMETRY_TYPE_AABBS
+} agfxAccelerationStructureGeometryType;
+
+/// @brief A structure describing a geometry in a bottom-level acceleration structure
+typedef struct agfxAccelerationStructureGeometry {
+    /// @brief The type of geometry (triangles or AABBs)
+    agfxAccelerationStructureGeometryType type;
+    /// @brief Whether the geometry is opaque or not. Opaque geometries can be used for early ray termination and other optimizations.
+    agfxBool opaque;
+    union {
+        struct {
+            /// @brief The vertex buffer containing the triangle vertices
+            agfxBuffer* vertexBuffer;
+            /// @brief The vertex buffer offset
+            uint32_t vertexOffset;
+            /// @brief The number of vertices in the vertex buffer
+            uint32_t vertexCount;
+            /// @brief The index buffer containing the triangle indices
+            agfxBuffer* indexBuffer;
+            /// @brief The number of indices in the index buffer
+            uint32_t indexCount;
+            /// @brief The index buffer offset
+            uint32_t indexOffset;
+        } triangles;
+        struct {
+            /// @brief The buffer containing the AABBs
+            agfxBuffer* aabbBuffer;
+            /// @brief The offset into the AABB buffer
+            uint32_t aabbOffset;
+            /// @brief The number of AABBs in the buffer
+            uint32_t aabbCount;
+            /// @brief The stride between AABBs in the buffer
+            uint32_t aabbStride;
+        } aabbs;
+    };
+} agfxAccelerationStructureGeometry;
+
+/// @brief A structure describing an instance of a bottom-level acceleration structure instance in a top-level acceleration structure
+typedef struct agfxAccelerationStructureInstance {
+    /// @brief The bottom-level acceleration structure to use by the instance
+    agfxAccelerationStructure* blas;
+    /// @brief The 3x4 row-major transform matrix for the instance
+    float transform[12];
+    /// @brief The instance ID, used for identifying the instance in shaders
+    uint32_t userID;
+    /// @brief Whether the instance is opaque or not. Opaque instances can be used for early ray termination and other optimizations.
+    agfxBool opaque;
+} agfxAccelerationStructureInstance;
+
+/// @brief A structure containing information for creating a bottom-level acceleration structure
+typedef struct agfxBottomLevelAccelerationStructureCreateInfo {
+    /// @brief The geometries to include in the bottom-level acceleration structure
+    agfxAccelerationStructureGeometry* geometries;
+    /// @brief The number of geometries in the geometries array
+    uint32_t geometryCount;
+} agfxBottomLevelAccelerationStructureCreateInfo;
+
+/// @brief A structure containing information for creating a top-level acceleration structure
+typedef struct agfxTopLevelAccelerationStructureCreateInfo {
+    /// @brief The maximum number of instances that can be included in the top-level acceleration structure.
+    uint32_t maxInstanceCount;
+} agfxTopLevelAccelerationStructureCreateInfo;
+
+/// @brief A structure containing information for creating an acceleration structure (top-level or bottom-level)
+typedef struct agfxAccelerationStructureCreateInfo {
+    /// @brief The type of acceleration structure to create (top-level or bottom-level)
+    agfxAccelerationStructureType type;
+    /// @brief The creation info for the bottom-level acceleration structure, if type is AGFX_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL
+    agfxBottomLevelAccelerationStructureCreateInfo bottomLevel;
+    /// @brief The creation info for the top-level acceleration structure, if type is AGFX_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL
+    agfxTopLevelAccelerationStructureCreateInfo topLevel;
+    /// @brief Whether the acceleration structure can be updated after creation. If true, the acceleration structure can be rebuilt
+    /// to support things like dynamic geometry (e.g. skinned meshes). If false, the acceleration structure is static and cannot be updated.
+    agfxBool allowUpdate;
+    /// @brief A debug name for the acceleration structure, visible in graphics debuggers.
+    const char* name;
+} agfxAccelerationStructureCreateInfo;
+
+/// @brief A structure containing the sizes of the scratch and update scratch buffers required for building or updating an acceleration structure
+typedef struct agfxAccelerationStructureSizes {
+    /// @brief The size of the scratch buffer required for building or updating the acceleration structure
+    uint64_t updateScratchBufferSize;
+    /// @brief The size of the scratch buffer required for building the acceleration structure
+    uint64_t scratchBufferSize;
+} agfxAccelerationStructureSizes;
+
+/// @brief Creates a new acceleration structure (top-level or bottom-level) on the specified device with the given creation info.
+/// @param device A pointer to the agfxDevice to create the acceleration structure on.
+/// @param createInfo A pointer to an agfxAccelerationStructureCreateInfo structure containing the creation parameters.
+/// @return A pointer to the newly created agfxAccelerationStructure, or nullptr on failure.
+agfxAccelerationStructure* agfxAccelerationStructureCreate(agfxDevice* device, const agfxAccelerationStructureCreateInfo* createInfo);
+
+/// @brief Creates a new acceleration structure (top-level or bottom-level) on the specified device with the given creation info, using a pre-allocated compacted size.
+/// @param device A pointer to the agfxDevice to create the acceleration structure on.
+/// @param createInfo A pointer to an agfxAccelerationStructureCreateInfo structure containing the creation parameters.
+/// @param compactedSize The size of the compacted acceleration structure, which must be obtained from agfxAccelerationStructureGetSizes after building the acceleration structure.
+/// @return A pointer to the newly created agfxAccelerationStructure, or nullptr on failure.
+agfxAccelerationStructure* agfxAccelerationStructureCreateCompacted(agfxDevice* device, const agfxAccelerationStructureCreateInfo* createInfo, uint64_t compactedSize);
+
+/// @brief Destroys the specified acceleration structure and releases all associated resources.
+/// @param device A pointer to the agfxDevice that owns the acceleration structure.
+/// @param accelerationStructure A pointer to the agfxAccelerationStructure to destroy.
+void agfxAccelerationStructureDestroy(agfxDevice* device, agfxAccelerationStructure* accelerationStructure);
+
+/// @brief Retrieves the sizes of the scratch and update scratch buffers required for building or updating the specified acceleration structure.
+/// @param device A pointer to the agfxDevice that owns the acceleration structure.
+/// @param accelerationStructure A pointer to the agfxAccelerationStructure to query.
+/// @param sizes A pointer to an agfxAccelerationStructureSizes structure that will be filled with
+void agfxAccelerationStructureGetSizes(agfxDevice* device, agfxAccelerationStructure* accelerationStructure, agfxAccelerationStructureSizes* sizes);
+
+/// @brief Retrieves the bindless descriptor handle of the specified acceleration structure, which can be used for interop with other APIs or for debugging purposes.
+/// @param accelerationStructure A pointer to the agfxAccelerationStructure to query.
+/// @return The bindless descriptor handle of the acceleration structure.
+uint64_t agfxAccelerationStructureGetHandle(agfxAccelerationStructure* accelerationStructure);
+
+/// @brief Adds instances to a top-level acceleration structure. The instances must be provided in an array of agfxAccelerationStructureInstance structures.
+/// @param accelerationStructure A pointer to the agfxAccelerationStructure to add instances to. Must be a top-level acceleration structure.
+/// @param instances A pointer to an array of agfxAccelerationStructureInstance structures describing the instances to add.
+/// @param instanceCount The number of instances in the instances array
+void agfxAccelerationStructureAddInstances(agfxAccelerationStructure* accelerationStructure, const agfxAccelerationStructureInstance* instances, uint32_t instanceCount);
+
+/// @brief Resets the instances of a top-level acceleration structure, removing all previously added instances.
+/// @param accelerationStructure A pointer to the agfxAccelerationStructure to reset instances for. Must be a top-level acceleration structure.
+void agfxAccelerationStructureResetInstances(agfxAccelerationStructure* accelerationStructure);
+
 /// @brief Creates a new agfxTexture with the specified creation info.
 /// @param device A pointer to the agfxDevice to create the texture on.
 /// @param createInfo A pointer to an agfxTextureCreateInfo structure containing the creation parameters.
@@ -563,6 +712,40 @@ void agfxComputePassPushConstants(agfxComputePass* computePass, const void* data
 /// @param groupCountY The number of thread groups in the Y dimension.
 /// @param groupCountZ The number of thread groups in the Z dimension.
 void agfxComputePassDispatch(agfxComputePass* computePass, uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ);
+
+/// @brief Builds a bottom-level or top-level acceleration structure using the specified scratch buffer.
+/// @param computePass A pointer to the agfxComputePass to record the build in.
+/// @param accelerationStructure A pointer to the agfxAccelerationStructure to build.
+/// @param scratchBuffer A pointer to an agfxBuffer to use as scratch space for the build. Must be at least the size returned by agfxAccelerationStructureGetSizes for the acceleration structure.
+/// @param scratchBufferOffset The byte offset into the scratch buffer to use for the build.
+void agfxComputePassBuildAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* accelerationStructure, agfxBuffer* scratchBuffer, uint64_t scratchBufferOffset);
+
+/// @brief Updates a bottom-level or top-level acceleration structure using the specified scratch buffer.
+/// @param computePass A pointer to the agfxComputePass to record the update in.
+/// @param srcAccelerationStructure A pointer to the source agfxAccelerationStructure to update from.
+/// @param dstAccelerationStructure A pointer to the destination agfxAccelerationStructure to update to.
+/// @param scratchBuffer A pointer to an agfxBuffer to use as scratch space for the update. Must be at least the size returned by agfxAccelerationStructureGetSizes for the acceleration structure.
+/// @param scratchBufferOffset The byte offset into the scratch buffer to use for the update.
+void agfxComputePassUpdateAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* srcAccelerationStructure, agfxAccelerationStructure* dstAccelerationStructure, agfxBuffer* scratchBuffer, uint64_t scratchBufferOffset);
+
+/// @brief Copies a bottom-level or top-level acceleration structure to another acceleration structure.
+/// @param computePass A pointer to the agfxComputePass to record the copy in.
+/// @param srcAccelerationStructure A pointer to the source agfxAccelerationStructure to copy from.
+/// @param dstAccelerationStructure A pointer to the destination agfxAccelerationStructure to copy to.
+void agfxComputePassCopyAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* srcAccelerationStructure, agfxAccelerationStructure* dstAccelerationStructure);
+
+/// @brief Writes the compacted size of a bottom-level or top-level acceleration structure to a buffer.
+/// @param computePass A pointer to the agfxComputePass to record the write in.
+/// @param accelerationStructure A pointer to the agfxAccelerationStructure to query for its compacted size.
+/// @param dstBuffer A pointer to the agfxBuffer to write the compacted size to.
+/// @param dstBufferOffset The byte offset into the destination buffer to write the compacted size to.
+void agfxComputePassWriteCompactedSizeToBuffer(agfxComputePass* computePass, agfxAccelerationStructure* accelerationStructure, agfxBuffer* dstBuffer, uint64_t dstBufferOffset);
+
+/// @brief Compacts a bottom-level or top-level acceleration structure into another acceleration structure.
+/// @param computePass A pointer to the agfxComputePass to record the compaction in.
+/// @param srcAccelerationStructure A pointer to the source agfxAccelerationStructure to compact.
+/// @param dstAccelerationStructure A pointer to the destination agfxAccelerationStructure to write the compacted data to. Must be created with the compacted size obtained from agfxAccelerationStructureGetSizes
+void agfxComputePassCompactAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* srcAccelerationStructure, agfxAccelerationStructure* dstAccelerationStructure);
 
 /// @brief Ends the specified agfxComputePass, finalizing its recorded commands.
 /// @param computePass A pointer to the agfxComputePass to end.

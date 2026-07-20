@@ -203,6 +203,32 @@ namespace agfx::ez
         std::array<std::optional<agfx::BufferView>, 3> mViews;
     };
 
+    /// @brief A built acceleration structure (bottom- or top-level). Created and built in one call
+    /// via Context::CreateBottomLevel / CreateTopLevel, which hide scratch allocation, residency,
+    /// and the AS->AS build barriers. Bind() gives the bindless handle to write into a ShaderBindings.
+    class AccelerationStructure
+    {
+    public:
+        AccelerationStructure() = default;
+        explicit AccelerationStructure(agfx::AccelerationStructure&& as) : mAS(std::move(as)) {}
+
+        AccelerationStructure(const AccelerationStructure&) = delete;
+        AccelerationStructure& operator=(const AccelerationStructure&) = delete;
+        AccelerationStructure(AccelerationStructure&&) = default;
+        AccelerationStructure& operator=(AccelerationStructure&&) = default;
+
+        agfx::AccelerationStructure& Raw() { return mAS; }
+
+        /// @brief True once a valid structure has been built (false on non-RT devices).
+        bool Valid() const { return static_cast<bool>(const_cast<agfx::AccelerationStructure&>(mAS)); }
+
+        /// @brief Bindless handle to trace against; write into a ShaderBindings slot. 0 if invalid.
+        uint32_t Bind() { return mAS ? static_cast<uint32_t>(mAS.GetHandle()) : 0u; }
+
+    private:
+        agfx::AccelerationStructure mAS;
+    };
+
     namespace detail
     {
         /// @brief Header-only staging-buffer uploader (same pattern as agfx_demo's AgfxUploader),
@@ -862,6 +888,64 @@ namespace agfx::ez
             return CreateInitializedBuffer(data, size, stride, usage);
         }
 
+        // --- Ray tracing (acceleration structures) ---
+
+        /// @brief True if this device can build/trace acceleration structures. Guard all RT work with it.
+        bool SupportsRayTracing() const { return mDevice->GetInfo().supportsRayTracing != 0; }
+
+        /// @brief Creates and synchronously builds a bottom-level acceleration structure from a triangle
+        /// mesh in the given ez::Buffers. vertexOffset/indexOffset are element indices into their buffers;
+        /// the first vertex attribute must be float3 position. Returns an invalid AS on non-RT devices.
+        AccelerationStructure CreateBottomLevel(Buffer& vertexBuffer, uint32_t vertexCount, uint32_t vertexOffset,
+                                                Buffer& indexBuffer, uint32_t indexCount, uint32_t indexOffset,
+                                                bool opaque = true, const char* name = "ez BLAS")
+        {
+            if (!SupportsRayTracing()) {
+                return AccelerationStructure();
+            }
+
+            agfxAccelerationStructureGeometry geometry{};
+            geometry.type = AGFX_ACCELERATION_STRUCTURE_GEOMETRY_TYPE_TRIANGLES;
+            geometry.opaque = opaque;
+            geometry.triangles.vertexBuffer = vertexBuffer.Raw();
+            geometry.triangles.vertexOffset = static_cast<uint32_t>(vertexOffset * vertexBuffer.Stride());
+            geometry.triangles.vertexCount = vertexCount;
+            geometry.triangles.indexBuffer = indexBuffer.Raw();
+            geometry.triangles.indexCount = indexCount;
+            geometry.triangles.indexOffset = static_cast<uint32_t>(indexOffset * indexBuffer.Stride());
+
+            agfxAccelerationStructureCreateInfo info{};
+            info.type = AGFX_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+            info.bottomLevel.geometries = &geometry;
+            info.bottomLevel.geometryCount = 1;
+            info.name = name;
+
+            agfx::AccelerationStructure blas = mDevice->CreateAccelerationStructure(info);
+            BuildOne(blas);
+            return AccelerationStructure(std::move(blas));
+        }
+
+        /// @brief Creates and synchronously builds a top-level acceleration structure over the given
+        /// instances. Each instance's transform is a row-major 3x4 matrix. The referenced BLAS must have
+        /// been built (e.g. via CreateBottomLevel) before this call. Returns invalid on non-RT devices.
+        AccelerationStructure CreateTopLevel(const agfxAccelerationStructureInstance* instances, uint32_t instanceCount,
+                                             const char* name = "ez TLAS")
+        {
+            if (!SupportsRayTracing()) {
+                return AccelerationStructure();
+            }
+
+            agfxAccelerationStructureCreateInfo info{};
+            info.type = AGFX_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+            info.topLevel.maxInstanceCount = instanceCount;
+            info.name = name;
+
+            agfx::AccelerationStructure tlas = mDevice->CreateAccelerationStructure(info);
+            tlas.AddInstances(instances, instanceCount);
+            BuildOne(tlas);
+            return AccelerationStructure(std::move(tlas));
+        }
+
         // --- Per-frame dynamic constants ---
 
         agfx::BufferView& AllocateConstants(const void* data, size_t size) { return mDynamicConstants.Allocate(data, size); }
@@ -939,6 +1023,43 @@ namespace agfx::ez
                 assert(false && "BytesPerPixel: block-compressed formats require an explicit bytesPerRow");
                 return 4;
             }
+        }
+
+        /// @brief Synchronously builds one acceleration structure on the graphics queue: allocates a
+        /// scratch buffer, makes everything resident, records the build with an AS->AS barrier (so the
+        /// result is safe to consume), submits, and blocks until it completes.
+        void BuildOne(agfx::AccelerationStructure& as)
+        {
+            agfxAccelerationStructureSizes sizes = as.GetSizes();
+
+            agfxBufferCreateInfo scratchInfo{};
+            scratchInfo.size = sizes.scratchBufferSize;
+            scratchInfo.stride = 4;
+            scratchInfo.usage = AGFX_BUFFER_USAGE_SHADER_WRITE;
+            scratchInfo.memoryType = AGFX_BUFFER_MEMORY_TYPE_GPU_ONLY;
+            agfx::Buffer scratch = mDevice->CreateBuffer(scratchInfo);
+
+            // The AS storage, its instance buffer, and the scratch buffer were all added to the
+            // residency set after any earlier commit -- re-commit before the GPU build references them.
+            mDevice->MakeResourcesResident();
+
+            agfx::CommandBuffer cmd = mDevice->CreateCommandBuffer(mQueue);
+            cmd.Reset();
+            cmd.Begin();
+            {
+                agfx::ComputePass pass = cmd.BeginComputePass("ez AS build");
+                pass.BuildAccelerationStructure(as, scratch, 0);
+            }
+            // AS->AS barrier: producer/consumer both MTLStageAccelerationStructure, so consumers of this
+            // structure (further builds, or the trace) see a completed build. A COMMON source is dropped.
+            cmd.AccelerationStructureBarrier(as, AGFX_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
+                                             AGFX_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, true);
+            cmd.End();
+
+            mQueue.Submit(cmd);
+            ++mFenceValue;
+            mQueue.Signal(mFrameFence, mFenceValue);
+            mFrameFence.Wait(mFenceValue, UINT64_MAX);
         }
 
         Buffer CreateInitializedBuffer(const void* data, uint64_t size, uint64_t stride, agfxBufferUsage usage)

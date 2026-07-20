@@ -9,6 +9,7 @@
 #include <cstring>
 #include <vector>
 #include <string>
+#include <new>
 
 #include <dxgi1_6.h>
 #include "d3dx12/d3d12.h"
@@ -264,6 +265,21 @@ struct agfxDescriptorManager {
     agfxSlotAllocator samplerSlotAllocator;
     agfxSlotAllocator rtvSlotAllocator;
     agfxSlotAllocator dsvSlotAllocator;
+};
+
+struct agfxAccelerationStructure {
+    agfxAccelerationStructureCreateInfo createInfo;
+    ID3D12Resource* d3d12Resource = nullptr;
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuildInfo = {};
+    agfxDescriptorAllocation descriptor = { {0}, {0}, UINT64_MAX }; // Bindless SRV slot, top level only
+
+    // Bottom level
+    std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometryDescs;
+
+    // Top level
+    ID3D12Resource* instanceBuffer = nullptr;
+    D3D12_RAYTRACING_INSTANCE_DESC* mappedInstanceBuffer = nullptr;
+    uint32_t currentInstanceCount = 0;
 };
 
 // device
@@ -672,6 +688,27 @@ void agfxCommandBufferBufferBarrier(agfxCommandBuffer* commandBuffer, agfxBuffer
     commandBuffer->d3d12CommandList->ResourceBarrier(1, &barrier);
 }
 
+void agfxCommandBufferAccelerationStructureBarrier(agfxCommandBuffer* commandBuffer, agfxAccelerationStructure* accelerationStructure, agfxResourceState oldState, agfxResourceState newState, agfxBool agglomerate) {
+    D3D12_RESOURCE_BARRIER barrier = {};
+
+    // AS resources live permanently in RAYTRACING_ACCELERATION_STRUCTURE state; ordering builds/reads
+    // against each other (e.g. BLAS build -> TLAS build) is a same-state wait, which D3D12 expresses
+    // as a UAV barrier, not a state transition (D3D12 rejects a transition whose before/after states match).
+    if (oldState == newState) {
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        barrier.UAV.pResource = accelerationStructure->d3d12Resource;
+    } else {
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = accelerationStructure->d3d12Resource;
+        barrier.Transition.StateBefore = agfxResourceStateToD3D12ResourceStates(oldState);
+        barrier.Transition.StateAfter = agfxResourceStateToD3D12ResourceStates(newState);
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    }
+
+    commandBuffer->d3d12CommandList->ResourceBarrier(1, &barrier);
+}
+
 // Texture
 
 agfxTexture* agfxTextureCreate(agfxDevice* device, const agfxTextureCreateInfo* createInfo) {
@@ -781,6 +818,234 @@ void agfxBufferSetName(agfxBuffer* buffer, const char* name) {
 
 void agfxBufferGetInfo(agfxBuffer* buffer, agfxBufferCreateInfo* info) {
     memcpy(info, &buffer->createInfo, sizeof(agfxBufferCreateInfo));
+}
+
+// Acceleration structure
+
+static D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS agfxAccelerationStructureBuildInputs(agfxAccelerationStructure* accelerationStructure) {
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
+    inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+    if (accelerationStructure->createInfo.allowUpdate) {
+        inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
+    }
+
+    if (accelerationStructure->createInfo.type == AGFX_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL) {
+        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        inputs.NumDescs = (UINT)accelerationStructure->geometryDescs.size();
+        inputs.pGeometryDescs = accelerationStructure->geometryDescs.data();
+    } else {
+        inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+        inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        // Always build/size for the full instance capacity (matches the Metal4 backend, which
+        // fixes MTL4InstanceAccelerationStructureDescriptor.instanceCount to maxInstanceCount at
+        // create time) so the prebuild sizing call and every later build call agree on NumDescs,
+        // which D3D12 requires for the allocated AS buffer to be large enough.
+        inputs.NumDescs = accelerationStructure->createInfo.topLevel.maxInstanceCount;
+        inputs.InstanceDescs = accelerationStructure->instanceBuffer ? accelerationStructure->instanceBuffer->GetGPUVirtualAddress() : 0;
+    }
+
+    return inputs;
+}
+
+agfxAccelerationStructure* agfxAccelerationStructureCreate(agfxDevice* device, const agfxAccelerationStructureCreateInfo* createInfo) {
+    agfxAccelerationStructure* accelerationStructure = (agfxAccelerationStructure*)device->createInfo.allocate(sizeof(agfxAccelerationStructure));
+    new (accelerationStructure) agfxAccelerationStructure();
+    memcpy(&accelerationStructure->createInfo, createInfo, sizeof(agfxAccelerationStructureCreateInfo));
+
+    if (createInfo->type == AGFX_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL) {
+        accelerationStructure->geometryDescs.reserve(createInfo->bottomLevel.geometryCount);
+        for (uint32_t i = 0; i < createInfo->bottomLevel.geometryCount; i++) {
+            agfxAccelerationStructureGeometry* geometry = &createInfo->bottomLevel.geometries[i];
+
+            D3D12_RAYTRACING_GEOMETRY_DESC geometryDesc = {};
+            geometryDesc.Flags = geometry->opaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+
+            if (geometry->type == AGFX_ACCELERATION_STRUCTURE_GEOMETRY_TYPE_TRIANGLES) {
+                geometryDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+                geometryDesc.Triangles.Transform3x4 = 0;
+                geometryDesc.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+                geometryDesc.Triangles.VertexCount = geometry->triangles.vertexCount;
+                geometryDesc.Triangles.VertexBuffer.StartAddress = geometry->triangles.vertexBuffer->d3d12Resource->GetGPUVirtualAddress() + geometry->triangles.vertexOffset;
+                geometryDesc.Triangles.VertexBuffer.StrideInBytes = geometry->triangles.vertexBuffer->createInfo.stride;
+                geometryDesc.Triangles.IndexFormat = geometry->triangles.indexBuffer->createInfo.stride == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
+                geometryDesc.Triangles.IndexCount = geometry->triangles.indexCount;
+                geometryDesc.Triangles.IndexBuffer = geometry->triangles.indexBuffer->d3d12Resource->GetGPUVirtualAddress() + geometry->triangles.indexOffset;
+            } else {
+                geometryDesc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_PROCEDURAL_PRIMITIVE_AABBS;
+                geometryDesc.AABBs.AABBCount = geometry->aabbs.aabbCount;
+                geometryDesc.AABBs.AABBs.StartAddress = geometry->aabbs.aabbBuffer->d3d12Resource->GetGPUVirtualAddress() + geometry->aabbs.aabbOffset;
+                geometryDesc.AABBs.AABBs.StrideInBytes = geometry->aabbs.aabbStride;
+            }
+
+            accelerationStructure->geometryDescs.push_back(geometryDesc);
+        }
+    } else {
+        uint32_t maxInstanceCount = createInfo->topLevel.maxInstanceCount;
+
+        D3D12_HEAP_PROPERTIES instanceHeapProperties = {};
+        instanceHeapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+        D3D12_RESOURCE_DESC instanceBufferDesc = {};
+        instanceBufferDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        instanceBufferDesc.Width = maxInstanceCount * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+        instanceBufferDesc.Height = 1;
+        instanceBufferDesc.DepthOrArraySize = 1;
+        instanceBufferDesc.MipLevels = 1;
+        instanceBufferDesc.SampleDesc.Count = 1;
+        instanceBufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        instanceBufferDesc.Format = DXGI_FORMAT_UNKNOWN;
+
+        device->d3d12Device->CreateCommittedResource(
+            &instanceHeapProperties,
+            D3D12_HEAP_FLAG_NONE,
+            &instanceBufferDesc,
+            D3D12_RESOURCE_STATE_GENERIC_READ,
+            nullptr,
+            IID_PPV_ARGS(&accelerationStructure->instanceBuffer));
+
+        D3D12_RANGE readRange = { 0, 0 };
+        accelerationStructure->instanceBuffer->Map(0, &readRange, (void**)&accelerationStructure->mappedInstanceBuffer);
+        // Builds always cover the full maxInstanceCount range (see agfxAccelerationStructureBuildInputs);
+        // zero-fill so slots beyond currentInstanceCount are inert (InstanceMask 0 -> always culled)
+        // instead of tracing against whatever garbage the upload heap handed back.
+        memset(accelerationStructure->mappedInstanceBuffer, 0, maxInstanceCount * sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
+    }
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = agfxAccelerationStructureBuildInputs(accelerationStructure);
+    device->d3d12Device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &accelerationStructure->prebuildInfo);
+
+    D3D12_HEAP_PROPERTIES heapProperties = {};
+    heapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC resourceDesc = {};
+    resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    resourceDesc.Width = accelerationStructure->prebuildInfo.ResultDataMaxSizeInBytes;
+    resourceDesc.Height = 1;
+    resourceDesc.DepthOrArraySize = 1;
+    resourceDesc.MipLevels = 1;
+    resourceDesc.SampleDesc.Count = 1;
+    resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+    resourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+    if (FAILED(device->d3d12Device->CreateCommittedResource(
+        &heapProperties,
+        D3D12_HEAP_FLAG_NONE,
+        &resourceDesc,
+        D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
+        nullptr,
+        IID_PPV_ARGS(&accelerationStructure->d3d12Resource)))) {
+        if (accelerationStructure->instanceBuffer) accelerationStructure->instanceBuffer->Release();
+        accelerationStructure->~agfxAccelerationStructure();
+        device->createInfo.free(accelerationStructure);
+        return NULL;
+    }
+
+    if (createInfo->type == AGFX_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.RaytracingAccelerationStructure.Location = accelerationStructure->d3d12Resource->GetGPUVirtualAddress();
+        accelerationStructure->descriptor = device->descriptorManager->writeSRV(nullptr, &srvDesc);
+    }
+
+    if (createInfo->name) {
+        std::wstring wname(createInfo->name, createInfo->name + strlen(createInfo->name));
+        accelerationStructure->d3d12Resource->SetName(wname.c_str());
+    }
+
+    return accelerationStructure;
+}
+
+agfxAccelerationStructure* agfxAccelerationStructureCreateCompacted(agfxDevice* device, const agfxAccelerationStructureCreateInfo* createInfo, uint64_t compactedSize) {
+    agfxAccelerationStructure* accelerationStructure = (agfxAccelerationStructure*)device->createInfo.allocate(sizeof(agfxAccelerationStructure));
+    new (accelerationStructure) agfxAccelerationStructure();
+    memcpy(&accelerationStructure->createInfo, createInfo, sizeof(agfxAccelerationStructureCreateInfo));
+    accelerationStructure->prebuildInfo.ResultDataMaxSizeInBytes = compactedSize;
+
+    D3D12_HEAP_PROPERTIES heapProperties = {};
+    heapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC resourceDesc = {};
+    resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    resourceDesc.Width = compactedSize;
+    resourceDesc.Height = 1;
+    resourceDesc.DepthOrArraySize = 1;
+    resourceDesc.MipLevels = 1;
+    resourceDesc.SampleDesc.Count = 1;
+    resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+    resourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+    if (FAILED(device->d3d12Device->CreateCommittedResource(
+        &heapProperties,
+        D3D12_HEAP_FLAG_NONE,
+        &resourceDesc,
+        D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
+        nullptr,
+        IID_PPV_ARGS(&accelerationStructure->d3d12Resource)))) {
+        accelerationStructure->~agfxAccelerationStructure();
+        device->createInfo.free(accelerationStructure);
+        return NULL;
+    }
+
+    if (createInfo->type == AGFX_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.RaytracingAccelerationStructure.Location = accelerationStructure->d3d12Resource->GetGPUVirtualAddress();
+        accelerationStructure->descriptor = device->descriptorManager->writeSRV(nullptr, &srvDesc);
+    }
+
+    if (createInfo->name) {
+        std::wstring wname(createInfo->name, createInfo->name + strlen(createInfo->name));
+        accelerationStructure->d3d12Resource->SetName(wname.c_str());
+    }
+
+    return accelerationStructure;
+}
+
+void agfxAccelerationStructureDestroy(agfxDevice* device, agfxAccelerationStructure* accelerationStructure) {
+    if (accelerationStructure->createInfo.type == AGFX_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL && accelerationStructure->descriptor.index != UINT64_MAX) {
+        device->descriptorManager->agfxFreeResourceSlot((uint32_t)accelerationStructure->descriptor.index);
+    }
+    if (accelerationStructure->instanceBuffer) {
+        accelerationStructure->instanceBuffer->Unmap(0, nullptr);
+        accelerationStructure->instanceBuffer->Release();
+    }
+    if (accelerationStructure->d3d12Resource) accelerationStructure->d3d12Resource->Release();
+    accelerationStructure->~agfxAccelerationStructure();
+    device->createInfo.free(accelerationStructure);
+}
+
+void agfxAccelerationStructureGetSizes(agfxDevice* device, agfxAccelerationStructure* accelerationStructure, agfxAccelerationStructureSizes* sizes) {
+    sizes->scratchBufferSize = accelerationStructure->prebuildInfo.ScratchDataSizeInBytes;
+    sizes->updateScratchBufferSize = accelerationStructure->prebuildInfo.UpdateScratchDataSizeInBytes;
+}
+
+uint64_t agfxAccelerationStructureGetHandle(agfxAccelerationStructure* accelerationStructure) {
+    return accelerationStructure->descriptor.index;
+}
+
+void agfxAccelerationStructureAddInstances(agfxAccelerationStructure* accelerationStructure, const agfxAccelerationStructureInstance* instances, uint32_t instanceCount) {
+    for (uint32_t i = 0; i < instanceCount; ++i) {
+        const agfxAccelerationStructureInstance* instance = &instances[i];
+        D3D12_RAYTRACING_INSTANCE_DESC& d3d12Instance = accelerationStructure->mappedInstanceBuffer[accelerationStructure->currentInstanceCount + i];
+        memcpy(d3d12Instance.Transform, instance->transform, sizeof(float) * 12);
+        d3d12Instance.InstanceID = instance->userID;
+        d3d12Instance.InstanceMask = 0xFF;
+        d3d12Instance.InstanceContributionToHitGroupIndex = 0;
+        d3d12Instance.Flags = instance->opaque ? D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE : D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
+        d3d12Instance.AccelerationStructure = instance->blas->d3d12Resource->GetGPUVirtualAddress();
+    }
+    accelerationStructure->currentInstanceCount += instanceCount;
+}
+
+void agfxAccelerationStructureResetInstances(agfxAccelerationStructure* accelerationStructure) {
+    accelerationStructure->currentInstanceCount = 0;
 }
 
 // Texture view
@@ -1370,6 +1635,51 @@ void agfxComputePassBufferUAVBarrier(agfxComputePass* computePass, agfxBuffer* b
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     barrier.UAV.pResource = buffer->d3d12Resource;
     computePass->commandBuffer->d3d12CommandList->ResourceBarrier(1, &barrier);
+}
+
+void agfxComputePassBuildAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* accelerationStructure, agfxBuffer* scratchBuffer, uint64_t scratchBufferOffset) {
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC desc = {};
+    desc.DestAccelerationStructureData = accelerationStructure->d3d12Resource->GetGPUVirtualAddress();
+    desc.ScratchAccelerationStructureData = scratchBuffer->d3d12Resource->GetGPUVirtualAddress() + scratchBufferOffset;
+    desc.Inputs = agfxAccelerationStructureBuildInputs(accelerationStructure);
+
+    computePass->commandBuffer->d3d12CommandList->BuildRaytracingAccelerationStructure(&desc, 0, nullptr);
+}
+
+void agfxComputePassUpdateAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* srcAccelerationStructure, agfxAccelerationStructure* dstAccelerationStructure, agfxBuffer* scratchBuffer, uint64_t scratchBufferOffset) {
+    if (!dstAccelerationStructure->createInfo.allowUpdate) return;
+
+    D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC desc = {};
+    desc.DestAccelerationStructureData = dstAccelerationStructure->d3d12Resource->GetGPUVirtualAddress();
+    desc.SourceAccelerationStructureData = srcAccelerationStructure->d3d12Resource->GetGPUVirtualAddress();
+    desc.ScratchAccelerationStructureData = scratchBuffer->d3d12Resource->GetGPUVirtualAddress() + scratchBufferOffset;
+    desc.Inputs = agfxAccelerationStructureBuildInputs(srcAccelerationStructure);
+    desc.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+
+    computePass->commandBuffer->d3d12CommandList->BuildRaytracingAccelerationStructure(&desc, 0, nullptr);
+}
+
+void agfxComputePassCopyAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* srcAccelerationStructure, agfxAccelerationStructure* dstAccelerationStructure) {
+    computePass->commandBuffer->d3d12CommandList->CopyRaytracingAccelerationStructure(
+        dstAccelerationStructure->d3d12Resource->GetGPUVirtualAddress(),
+        srcAccelerationStructure->d3d12Resource->GetGPUVirtualAddress(),
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_CLONE);
+}
+
+void agfxComputePassWriteCompactedSizeToBuffer(agfxComputePass* computePass, agfxAccelerationStructure* accelerationStructure, agfxBuffer* dstBuffer, uint64_t dstBufferOffset) {
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postbuildInfoDesc = {};
+    postbuildInfoDesc.DestBuffer = dstBuffer->d3d12Resource->GetGPUVirtualAddress() + dstBufferOffset;
+    postbuildInfoDesc.InfoType = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE;
+
+    D3D12_GPU_VIRTUAL_ADDRESS sourceAS = accelerationStructure->d3d12Resource->GetGPUVirtualAddress();
+    computePass->commandBuffer->d3d12CommandList->EmitRaytracingAccelerationStructurePostbuildInfo(&postbuildInfoDesc, 1, &sourceAS);
+}
+
+void agfxComputePassCompactAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* srcAccelerationStructure, agfxAccelerationStructure* dstAccelerationStructure) {
+    computePass->commandBuffer->d3d12CommandList->CopyRaytracingAccelerationStructure(
+        dstAccelerationStructure->d3d12Resource->GetGPUVirtualAddress(),
+        srcAccelerationStructure->d3d12Resource->GetGPUVirtualAddress(),
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT);
 }
 
 void agfxComputePassCopyTextureToBuffer(agfxComputePass* computePass, agfxTexture* texture, agfxBuffer* buffer, uint64_t bufferOffset, const agfxTextureRegion* region, uint32_t mipLevel, uint32_t layer, uint32_t bytesPerRow, uint32_t bytesPerImage) {

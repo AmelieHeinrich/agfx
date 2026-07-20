@@ -5,6 +5,7 @@
  */
 
 #include "data/shaders/agfx.h"
+#include "data/shaders/demo/pbr_common.hlsl"
 
 struct LightingSceneConstants {
     float4x4 invViewProj;
@@ -28,137 +29,11 @@ struct LightingPushConstants {
     ResourceHandle shadowComparisonSampler;
     ResourceHandle pointSampler;
     ResourceHandle aoTex;
+    ResourceHandle reflTex;
+    uint reflectionsEnabled;
 };
-
-#define PI 3.14159265359f
-
-// GGX/Trowbridge-Reitz normal distribution function.
-float D_GGX(float NdotH, float roughness)
-{
-    float a = roughness * roughness;
-    float a2 = a * a;
-    float d = (NdotH * NdotH) * (a2 - 1.0f) + 1.0f;
-    return a2 / max(PI * d * d, 1e-6f);
-}
-
-// Smith geometry term with Schlick-GGX approximation (direct lighting k).
-float G_SchlickGGX(float NdotV, float k)
-{
-    return NdotV / max(NdotV * (1.0f - k) + k, 1e-6f);
-}
-
-float G_Smith(float NdotV, float NdotL, float roughness)
-{
-    float k = (roughness + 1.0f) * (roughness + 1.0f) / 8.0f;
-    return G_SchlickGGX(NdotV, k) * G_SchlickGGX(NdotL, k);
-}
-
-float3 F_Schlick(float VdotH, float3 F0)
-{
-    return F0 + (1.0f - F0) * pow(saturate(1.0f - VdotH), 5.0f);
-}
-
-// Cook-Torrance specular + Lambertian diffuse for a single directional light.
-float3 PBR_DirectLight(float3 albedo, float metallic, float roughness, float3 N, float3 V, float3 L, float3 radiance)
-{
-    float3 H = normalize(V + L);
-    float NdotV = max(dot(N, V), 1e-4f);
-    float NdotL = max(dot(N, L), 0.0f);
-    float NdotH = max(dot(N, H), 0.0f);
-    float VdotH = max(dot(V, H), 0.0f);
-
-    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-
-    float D = D_GGX(NdotH, roughness);
-    float G = G_Smith(NdotV, NdotL, roughness);
-    float3 F = F_Schlick(VdotH, F0);
-
-    float3 specular = (D * G * F) / max(4.0f * NdotV * NdotL, 1e-6f);
-
-    float3 kD = (1.0f - F) * (1.0f - metallic);
-    float3 diffuse = kD * albedo / PI;
-
-    return (diffuse + specular) * radiance * NdotL;
-}
 
 AGFX_PUSH_CONSTANTS(LightingPushConstants, g_Constants);
-
-#define MAX_CASCADES 4
-
-struct CascadeConstants {
-    float4x4 viewProj[MAX_CASCADES];
-    float4 splitFar;
-    float4 texelWorldSize;
-    uint cascadeCount;
-    float shadowMapResolution;
-    float depthBiasConstant;
-    float lightSizeUV;
-    float pcssMaxPenumbraUV;
-    uint visualizeCascades;
-    float2 _pad0;
-};
-
-static const float2 kPoissonDisk[8] = {
-    float2(-0.326,-0.406), float2(-0.840,-0.074), float2(-0.696, 0.457), float2(-0.203, 0.621),
-    float2( 0.962,-0.195), float2( 0.473,-0.480), float2( 0.519, 0.767), float2( 0.185,-0.893)
-};
-
-static const float3 kCascadeDebugColors[MAX_CASCADES] = {
-    float3(1.0f, 0.3f, 0.3f), float3(0.3f, 1.0f, 0.3f), float3(0.3f, 0.3f, 1.0f), float3(1.0f, 1.0f, 0.3f)
-};
-
-float PCSS_BlockerSearch(AGFXTexture2DArray<float> shadowMap, AGFXSampler pointSamp, float3 uvSlice, float receiverDepth, float searchRadiusUV)
-{
-    float blockerSum = 0.0f;
-    int count = 0;
-    [unroll]
-    for (int i = 0; i < 8; ++i) {
-        float2 offset = kPoissonDisk[i] * searchRadiusUV;
-        float sampleDepth = shadowMap.Sample(pointSamp, float3(uvSlice.xy + offset, uvSlice.z));
-        if (sampleDepth < receiverDepth) {
-            blockerSum += sampleDepth;
-            count++;
-        }
-    }
-    return count > 0 ? blockerSum / (float)count : -1.0f;
-}
-
-float PCSS_Shadow(AGFXTexture2DArray<float> shadowMap, AGFXComparisonSampler cmpSamp, AGFXSampler pointSamp,
-                   float3 uvSlice, float receiverDepth, float lightSizeUV, float maxPenumbraUV)
-{
-    float avgBlockerDepth = PCSS_BlockerSearch(shadowMap, pointSamp, uvSlice, receiverDepth, lightSizeUV);
-    if (avgBlockerDepth < 0.0f) {
-        return 1.0f;
-    }
-
-    float penumbraRatio = (receiverDepth - avgBlockerDepth) / max(avgBlockerDepth, 1e-4f);
-    float penumbraUV = clamp(penumbraRatio * lightSizeUV, 0.0f, maxPenumbraUV);
-
-    float sum = 0.0f;
-    [unroll]
-    for (int i = 0; i < 8; ++i) {
-        float2 offset = kPoissonDisk[i] * penumbraUV;
-        sum += shadowMap.SampleCmp(cmpSamp, float3(uvSlice.xy + offset, uvSlice.z), receiverDepth);
-    }
-    return sum / 8.0f;
-}
-
-// Reprojects worldPos into cascade `cascadeIndex`'s clip space and evaluates PCSS soft shadow.
-// Returns 1.0 (fully lit) if the point falls outside the cascade's shadow-map bounds.
-float SampleCascadeShadow(AGFXTexture2DArray<float> shadowMap, AGFXComparisonSampler cmpSamp, AGFXSampler pointSamp,
-                           CascadeConstants cc, uint cascadeIndex, float3 worldPos)
-{
-    float4 lsClip = mul(cc.viewProj[cascadeIndex], float4(worldPos, 1.0f));
-    float3 lsNDC = lsClip.xyz / lsClip.w;
-    float2 shadowUV = lsNDC.xy * float2(0.5f, -0.5f) + 0.5f;
-    float receiverDepth = lsNDC.z;
-
-    if (any(shadowUV < 0.0f) || any(shadowUV > 1.0f) || receiverDepth < 0.0f || receiverDepth > 1.0f) {
-        return 1.0f;
-    }
-
-    return PCSS_Shadow(shadowMap, cmpSamp, pointSamp, float3(shadowUV, (float)cascadeIndex), receiverDepth, cc.lightSizeUV, cc.pcssMaxPenumbraUV);
-}
 
 struct vs_out {
     float4 position : SV_POSITION;
@@ -249,6 +124,14 @@ float4 main_ps(vs_out input) : SV_TARGET {
     float3 ambientF = F_Schlick(max(dot(normal, viewDir), 0.0f), lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic));
     float3 ambientKd = (1.0f - ambientF) * (1.0f - metallic);
     float3 ambient = ambientKd * albedo * 0.03f * ao;
+
+    // Traced mirror reflections (reflections.hlsl) replace the flat ambient term
+    // wherever a reflection ray was actually shot and hit something (alpha = 1).
+    if (g_Constants.reflectionsEnabled != 0) {
+        AGFXTexture2D<float4> reflTex = AGFXTexture2D<float4>::Create(g_Constants.reflTex);
+        float4 reflColor = reflTex.Sample(samp, input.uv);
+        ambient = lerp(ambient, reflColor.rgb, reflColor.a * max(ambientF.r, max(ambientF.g, ambientF.b)));
+    }
 
     float3 color = ambient + directLight;
 
