@@ -60,7 +60,7 @@ In this repository you can find a few different folders:
 ## Getting started
 
 ### Requirements
-- Mac: Apple Silicon M1 and above (M3+ for mesh shading) and macOS 26+
+- Mac: Apple Silicon M1 and above (M3+ for mesh shading and raytracing) and macOS 26+
 - Windows: Any GPU that supports bindless
 
 ### Compiling
