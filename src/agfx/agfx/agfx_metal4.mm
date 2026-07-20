@@ -565,6 +565,11 @@ void agfxCommandBufferBufferBarrier(agfxCommandBuffer* commandBuffer, agfxBuffer
     commandBuffer->barrierTracker.addBarrier(oldState, newState);
 }
 
+void agfxCommandBufferAccelerationStructureBarrier(agfxCommandBuffer* commandBuffer, agfxAccelerationStructure* accelerationStructure, agfxResourceState oldState, agfxResourceState newState, agfxBool agglomerate) {
+    if (!agglomerate) return;
+    commandBuffer->barrierTracker.addBarrier(oldState, newState);
+}
+
 // Texture
 struct agfxTexture {
     agfxTextureCreateInfo createInfo;
@@ -678,6 +683,26 @@ void agfxComputePassPushConstants(agfxComputePass* computePass, const void* data
 void agfxComputePassDispatch(agfxComputePass* computePass, uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) {
     [computePass->encoder dispatchThreadgroups:MTLSizeMake(groupCountX, groupCountY, groupCountZ)
                         threadsPerThreadgroup:MTLSizeMake(computePass->currentPipeline->createInfo.groupSizeX, computePass->currentPipeline->createInfo.groupSizeY, computePass->currentPipeline->createInfo.groupSizeZ)];
+}
+
+void agfxComputePassBuildAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* accelerationStructure, agfxBuffer* scratchBuffer, uint64_t scratchBufferOffset) {
+    // TODO
+}
+
+void agfxComputePassUpdateAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* accelerationStructure, agfxBuffer* scratchBuffer, uint64_t scratchBufferOffset) {
+    // TODO
+}
+
+void agfxComputePassCopyAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* srcAccelerationStructure, agfxAccelerationStructure* dstAccelerationStructure) {
+    // TODO
+}
+
+void agfxComputePassWriteCompactedSizeToBuffer(agfxComputePass* computePass, agfxAccelerationStructure* accelerationStructure, agfxBuffer* dstBuffer, uint64_t dstBufferOffset) {
+    // TODO
+}
+
+void agfxComputePassCompactAccelerationStructure(agfxComputePass* computePass, agfxAccelerationStructure* srcAccelerationStructure, agfxAccelerationStructure* dstAccelerationStructure) {
+    // TODO
 }
 
 // Buffer
@@ -1151,6 +1176,35 @@ agfxComputePipeline* agfxComputePipelineCreate(agfxDevice* device, const agfxCom
 void agfxComputePipelineDestroy(agfxDevice* device, agfxComputePipeline* pipeline) {
     pipeline->pipelineState = nil;
     device->createInfo.free(pipeline);
+}
+
+// Acceleration structure
+agfxAccelerationStructure* agfxAccelerationStructureCreate(agfxDevice* device, const agfxAccelerationStructureCreateInfo* createInfo) {
+    return nullptr;
+}
+
+agfxAccelerationStructure* agfxAccelerationStructureCreateCompacted(agfxDevice* device, const agfxAccelerationStructureCreateInfo* createInfo, uint64_t compactedSize) {
+    return nullptr;
+}
+
+void agfxAccelerationStructureDestroy(agfxDevice* device, agfxAccelerationStructure* accelerationStructure) {
+
+}
+
+void agfxAccelerationStructureGetSizes(agfxDevice* device, agfxAccelerationStructure* accelerationStructure, agfxAccelerationStructureSizes* sizes) {
+
+}
+
+uint64_t agfxAccelerationStructureGetHandle(agfxAccelerationStructure* accelerationStructure) {
+    return 0;
+}
+
+void agfxAccelerationStructureAddInstances(agfxAccelerationStructure* accelerationStructure, const agfxAccelerationStructureInstance* instances, uint32_t instanceCount) {
+
+}
+
+void agfxAccelerationStructureResetInstances(agfxAccelerationStructure* accelerationStructure) {
+
 }
 
 //
