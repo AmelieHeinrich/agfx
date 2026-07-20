@@ -114,7 +114,9 @@ desc.depthTestEnable = true;
 ctx.SetPipeline(desc); // hashed and cached internally -- same desc == same agfx::RenderPipeline reused
 ```
 
-`SetPipeline` must be called after `SetRenderTargets`/`SetBackBufferRenderTarget` in the same pass — the cache key includes the currently bound color/depth formats, which aren't known until targets are set. `PipelineDesc` is intentionally limited (uniform blend state across all color attachments, no per-attachment arrays, no indirect draw, no mesh/task shaders) — drop to raw AGFX (`agfxRenderPipelineCreateInfo` directly, via `ctx.GetDevice()`) for anything needing per-attachment blend state or mesh shading.
+`SetPipeline` must be called after `SetRenderTargets`/`SetBackBufferRenderTarget` in the same pass — the cache key includes the currently bound color/depth formats, which aren't known until targets are set. `PipelineDesc` is intentionally limited (uniform blend state across all color attachments, no per-attachment arrays, no indirect draw) — drop to raw AGFX (`agfxRenderPipelineCreateInfo` directly, via `ctx.GetDevice()`) for anything needing per-attachment blend state.
+
+Mesh shading is supported: set `desc.meshShader` (and optionally `desc.taskShader`) instead of `desc.vertexShader`, keep `desc.fragmentShader` set, then draw with `ctx.DrawMesh(groupCountX, groupCountY, groupCountZ)` instead of `ctx.Draw`/`ctx.DrawIndexed`. A `PipelineDesc` must set exactly one of `vertexShader` or `meshShader` — mixing both (or setting neither) asserts.
 
 ### Push constants via ShaderBindings
 
@@ -165,7 +167,7 @@ agfx::CommandQueue& queue = ctx.GetGraphicsQueue();
 agfx::CommandBuffer& cmd = ctx.GetCurrentCommandBuffer(); // e.g. to hand to ImGui_ImplAGFX_RenderDrawData
 ```
 
-Use these when a specific piece of code needs raw AGFX control (custom barrier scheduling, resource types `Texture2D`/`Buffer` don't model, multiple command buffers per frame, mesh shaders) without abandoning ez for the rest of the app — `GetActiveRenderPass()` similarly exposes the raw `agfx::RenderPass&` mid-frame for cases like handing it to a third-party ImGui backend.
+Use these when a specific piece of code needs raw AGFX control (custom barrier scheduling, resource types `Texture2D`/`Buffer` don't model, multiple command buffers per frame) without abandoning ez for the rest of the app — `GetActiveRenderPass()` similarly exposes the raw `agfx::RenderPass&` mid-frame for cases like handing it to a third-party ImGui backend.
 
 ## Common Mistakes
 
@@ -173,4 +175,5 @@ Use these when a specific piece of code needs raw AGFX control (custom barrier s
 - **Caching a `ShaderBindings` or `AllocateConstants` view across frames.** Both are frame-scoped; the ring buffer slot backing `AllocateConstants`'s return value gets overwritten once the frame-in-flight slot recycles.
 - **Calling `SetPipeline` before `SetRenderTargets`/`SetBackBufferRenderTarget`.** The pipeline cache key depends on the currently bound attachment formats — this ordering isn't optional.
 - **Assuming `TransitionTexture`/`SetRenderTargets` tracking covers UAV read/write hazards within a compute pass.** It doesn't — use the re-exposed `TextureUAVBarrier`/`BufferUAVBarrier` on the raw `agfx::ComputePass` for that (see `agfx-synchronization`), same requirement as raw AGFX.
-- **Reaching for ez on a codebase that needs mesh shaders, indirect draw, per-attachment blend state, or manual multi-command-buffer scheduling.** `PipelineDesc` and `Context`'s single-command-buffer-per-frame-slot model don't cover these — use raw AGFX instead (or ez for the parts that fit, raw AGFX for the parts that don't, via the escape hatches above).
+- **Reaching for ez on a codebase that needs indirect draw, per-attachment blend state, or manual multi-command-buffer scheduling.** `PipelineDesc` and `Context`'s single-command-buffer-per-frame-slot model don't cover these — use raw AGFX instead (or ez for the parts that fit, raw AGFX for the parts that don't, via the escape hatches above). Mesh shading is covered by ez (`PipelineDesc::meshShader`/`taskShader`, `Context::DrawMesh`).
+- **Setting both `vertexShader` and `meshShader` on a `PipelineDesc` (or neither).** Exactly one must be set — `SetPipeline` asserts otherwise.

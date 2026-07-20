@@ -456,12 +456,16 @@ namespace agfx::ez
 
     /// @brief A simplified render pipeline description with D3D11-typical defaults.
     /// @note Uniform blend state across all bound color attachments; no per-attachment arrays,
-    ///       no indirect draw support, no mesh/task shaders — advanced users drop to raw agfx.hpp.
+    ///       no indirect draw support — advanced users drop to raw agfx.hpp.
+    /// @note Either set vertexShader (classic pipeline, draw with Context::Draw/DrawIndexed) or
+    ///       meshShader (and optionally taskShader; draw with Context::DrawMesh) — not both.
     struct PipelineDesc
     {
         const char* name = "ez pipeline";
         agfx::ShaderModule* vertexShader = nullptr;
         agfx::ShaderModule* fragmentShader = nullptr;
+        agfx::ShaderModule* taskShader = nullptr;
+        agfx::ShaderModule* meshShader = nullptr;
 
         agfxFillMode fillMode = AGFX_FILL_MODE_SOLID;
         agfxCullMode cullMode = AGFX_CULL_MODE_BACK;
@@ -502,6 +506,8 @@ namespace agfx::ez
                 hash = FnvHashValue(hash, desc.blendOp);
                 hash = FnvHashValue(hash, desc.vertexShader);
                 hash = FnvHashValue(hash, desc.fragmentShader);
+                hash = FnvHashValue(hash, desc.taskShader);
+                hash = FnvHashValue(hash, desc.meshShader);
                 hash = FnvHash(hash, colorFormats, sizeof(agfxTextureFormat) * colorCount);
                 hash = FnvHashValue(hash, colorCount);
                 hash = FnvHashValue(hash, hasDepth ? depthFormat : AGFX_TEXTURE_FORMAT_UNKNOWN);
@@ -534,7 +540,16 @@ namespace agfx::ez
                     info.dstAlphaBlendFactor[i] = desc.dstBlend;
                     info.alphaBlendOp[i] = desc.blendOp;
                 }
-                info.vertexShader = *desc.vertexShader;
+                assert(((desc.vertexShader && !desc.meshShader) || (!desc.vertexShader && desc.meshShader)) &&
+                       "PipelineDesc: set exactly one of vertexShader (classic) or meshShader (mesh shading)");
+                if (desc.meshShader) {
+                    info.meshShader = *desc.meshShader;
+                    if (desc.taskShader) {
+                        info.taskShader = *desc.taskShader;
+                    }
+                } else {
+                    info.vertexShader = *desc.vertexShader;
+                }
                 info.fragmentShader = *desc.fragmentShader;
 
                 auto [inserted, _] = mPipelines.emplace(hash, device.CreateRenderPipeline(info));
@@ -837,6 +852,14 @@ namespace agfx::ez
         {
             assert(mActiveRenderPass);
             mActiveRenderPass->DrawIndexed(indexBuffer.Raw(), indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+        }
+
+        /// @brief Dispatches a mesh-shading pipeline (bound via SetPipeline with PipelineDesc::meshShader
+        /// set). groupCount* are thread-group counts, not vertex/index counts -- same as raw agfxRenderPassDrawMesh.
+        void DrawMesh(uint32_t groupCountX, uint32_t groupCountY = 1, uint32_t groupCountZ = 1)
+        {
+            assert(mActiveRenderPass);
+            mActiveRenderPass->DrawMesh(groupCountX, groupCountY, groupCountZ);
         }
 
         // --- One-call resource creation (immediate, synchronous upload) ---
