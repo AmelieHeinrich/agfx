@@ -338,6 +338,10 @@ int main()
 #endif
     }
 
+    // ImGui_ImplAGFX_Shutdown() destroys the ImGui vertex/index buffers immediately, so the
+    // GPU must be drained first -- otherwise a still in-flight command buffer referencing them
+    // (e.g. still executing on Windows when the swap chain hasn't caught up) races their release.
+    ctx.DrainGPU();
     ImGui_ImplAGFX_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();

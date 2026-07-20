@@ -899,6 +899,16 @@ namespace agfx::ez
         agfx::CommandBuffer& GetCurrentCommandBuffer() { return mCommandBuffers[mFrameSlot]; }
         agfxTextureFormat GetSwapChainFormat() const { return mSwapChain.GetFormat(); }
 
+        // Block until all GPU work submitted so far has completed. Callers must drain before
+        // destroying/replacing any resource that an in-flight command buffer may still reference
+        // (e.g. before tearing down a renderer built on top of this Context).
+        void DrainGPU()
+        {
+            ++mFenceValue;
+            mQueue.Signal(mFrameFence, mFenceValue);
+            mFrameFence.Wait(mFenceValue, UINT64_MAX);
+        }
+
     private:
         static uint32_t BytesPerPixel(agfxTextureFormat format)
         {
@@ -951,13 +961,6 @@ namespace agfx::ez
             mDevice->MakeResourcesResident();
 
             return buffer;
-        }
-
-        void DrainGPU()
-        {
-            ++mFenceValue;
-            mQueue.Signal(mFrameFence, mFenceValue);
-            mFrameFence.Wait(mFenceValue, UINT64_MAX);
         }
 
         agfx::Device mOwnedDevice;
