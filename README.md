@@ -84,4 +84,4 @@ On Windows:
 ## Projects that use AGFX
 
 - Eclipse (Amélie Heinrich) : Adventure puzzle game where you set out to vanquish an evil force trying to plunge the world into darkness.
-- Bane of the Heavens (RyDawgE) : Adventure voxel game
+- Voxel Game (RyDawgE) : Adventure voxel game
