@@ -1,0 +1,6 @@
+.cache
+.xmake
+.claude/settings.json
+build
+compile_commands.json
+imgui.ini
