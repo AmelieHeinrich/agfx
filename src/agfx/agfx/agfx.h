@@ -73,6 +73,9 @@ typedef struct agfxComputePipeline agfxComputePipeline;
 /// @brief A raytracing acceleration structure object. Represents a GPU acceleration structure for raytracing operations.
 typedef struct agfxAccelerationStructure agfxAccelerationStructure;
 
+/// @brief A bundle of indirect commands. Holds a GPU commands buffer and a count buffer, used for GPU driven rendering or compute.
+typedef struct agfxIndirectBundle agfxIndirectBundle;
+
 /// @brief A structure containing information for creating an agfxDevice.
 typedef struct agfxDeviceCreateInfo {
     /// @brief The allocation function to use for device memory allocations.
@@ -631,6 +634,140 @@ void agfxTextureReplaceRegion(agfxDevice* device, agfxTexture* texture, const ag
 /// @param texture A pointer to the agfxTexture to name.
 /// @param name The null-terminated name string to assign.
 void agfxTextureSetName(agfxTexture* texture, const char* name);
+
+// Indirect bundle
+typedef enum agfxIndirectBundleType {
+    /// @brief An indirect bundle that can hold draw commands.
+    AGFX_INDIRECT_BUNDLE_TYPE_DRAW,
+    /// @brief An indirect bundle that can hold indexed draw commands.
+    AGFX_INDIRECT_BUNDLE_TYPE_DRAW_INDEXED,
+    /// @brief An indirect bundle that can hold mesh shading draw commands.
+    AGFX_INDIRECT_BUNDLE_TYPE_DRAW_MESH,
+    /// @brief An indirect bundle that can hold dispatch commands.
+    AGFX_INDIRECT_BUNDLE_TYPE_DISPATCH
+} agfxIndirectBundleType;
+
+typedef struct agfxIndirectBundleCreateInfo {
+    /// @brief The type of indirect bundle to create. Must be one of the values in agfxIndirectBundleType.
+    agfxIndirectBundleType type;
+    /// @brief The maximum of commands that the indirect bundle can hold.
+    uint32_t maxCommandCount;
+    /// @brief The count buffer can hold multiple counts for multiple indirect draws/dispatches. This is the maximum number of counts that can be stored in the count buffer.
+    /// @note It's a bit of a mouthful, sorry ;D
+    uint32_t maxCountCount;
+} agfxIndirectBundleCreateInfo;
+
+/// @brief A structure containing information for executing a draw command.
+/// @note drawID is the leading field: the D3D12 command signature for this bundle type declares
+///       the drawID CONSTANT argument at index 0 and the terminal DRAW/DRAW_INDEXED/DISPATCH_MESH/DISPATCH
+///       argument at index 1, so drawID must be the first field in memory.
+typedef struct agfxDrawCommand {
+    /// @brief The ID of the draw
+    uint32_t drawID;
+    /// @brief The number of vertices to draw.
+    uint32_t vertexCount;
+    /// @brief The number of instances to draw.
+    uint32_t instanceCount;
+    /// @brief The index of the first vertex to draw.
+    uint32_t firstVertex;
+    /// @brief The index of the first instance to draw.
+    uint32_t firstInstance;
+} agfxDrawCommand;
+
+typedef struct agfxDrawIndexedCommand {
+    /// @brief The ID of the draw
+    uint32_t drawID;
+    /// @brief The number of indices to draw.
+    uint32_t indexCount;
+    /// @brief The number of instances to draw.
+    uint32_t instanceCount;
+    /// @brief The index of the first index to draw.
+    uint32_t firstIndex;
+    /// @brief The value added to each index before indexing into the vertex buffer.
+    int32_t vertexOffset;
+    /// @brief The index of the first instance to draw.
+    uint32_t firstInstance;
+} agfxDrawIndexedCommand;
+
+typedef struct agfxDrawMeshCommand {
+    /// @brief The ID of the draw
+    uint32_t drawID;
+    /// @brief The number of mesh tasks to draw, X dimension.
+    uint32_t groupSizeX;
+    /// @brief The number of mesh tasks to draw, Y dimension. For 1D mesh shaders, this should be set to 1.
+    uint32_t groupSizeY;
+    /// @brief The number of mesh tasks to draw, Z dimension. For 2D mesh shaders, this should be set to 1.
+    uint32_t groupSizeZ;
+} agfxDrawMeshCommand;
+
+typedef struct agfxDispatchCommand {
+    /// @brief The number of workgroups to dispatch, X dimension.
+    uint32_t groupCountX;
+    /// @brief The number of workgroups to dispatch, Y dimension.
+    uint32_t groupCountY;
+    /// @brief The number of workgroups to dispatch, Z dimension.
+    uint32_t groupCountZ;
+} agfxDispatchCommand;
+
+/// @brief A structure containing information for executing an indirect bundle.
+typedef struct agfxIndirectBundleExecuteInfo {
+    /// @brief The index of the count buffer to read the count from.
+    uint32_t countIndex;
+    /// @brief The first command slot (in command-struct units) to read/write, allowing several sub-bundles to share one commands buffer.
+    uint32_t commandOffset;
+    /// @brief The maximum number of commands this call may touch, starting at commandOffset. Independent of the bundle's creation-time maxCommandCount.
+    uint32_t maxCommandCount;
+    /// @brief The push constants to be set for the indirect bundle execution. Must be a multiple of 4 bytes and not exceed 128 bytes.
+    char pushConstants[128];
+    /// @brief The render pipeline to use for the indirect bundle execution. Must be set for draw and draw indexed bundles.
+    agfxRenderPipeline* renderPipeline;
+    /// @brief The compute pipeline to use for the indirect bundle execution. Must be set for dispatch bundles.
+    agfxComputePipeline* computePipeline;
+    /// @brief The index buffer to use for the indirect bundle execution. Must be set for draw indexed bundles.
+    agfxBuffer* indexBuffer;
+} agfxIndirectBundleExecuteInfo;
+
+/// @brief Creates a new agfxIndirectBundle with the specified creation info.
+/// @param device A pointer to the agfxDevice to create the indirect bundle on.
+/// @param createInfo A pointer to an agfxIndirectBundleCreateInfo structure containing the creation parameters.
+/// @return A pointer to the newly created agfxIndirectBundle, or nullptr on failure.
+agfxIndirectBundle* agfxIndirectBundleCreate(agfxDevice* device, const agfxIndirectBundleCreateInfo* createInfo);
+
+/// @brief Destroys the specified agfxIndirectBundle and releases all associated resources.
+/// @param device A pointer to the agfxDevice that owns the indirect bundle.
+void agfxIndirectBundleDestroy(agfxDevice* device, agfxIndirectBundle* bundle);
+
+/// @brief Retrieves the bindless descriptor handle of the specified agfxIndirectBundle, which can be used for interop with other APIs or for debugging purposes.
+/// @param bundle A pointer to the agfxIndirectBundle to query.
+/// @note First 32 bits of the handle are the command buffer descriptor, and the last 32 bits are the count buffer descriptor.
+uint64_t agfxIndirectBundleGetHandle(agfxIndirectBundle* bundle);
+
+/// @brief Retrieves the underlying commands buffer of the specified agfxIndirectBundle, e.g. for barriers.
+/// @param bundle A pointer to the agfxIndirectBundle to query.
+agfxBuffer* agfxIndirectBundleGetCommandsBuffer(agfxIndirectBundle* bundle);
+
+/// @brief Retrieves the underlying count buffer of the specified agfxIndirectBundle, e.g. for barriers or resets.
+/// @param bundle A pointer to the agfxIndirectBundle to query.
+agfxBuffer* agfxIndirectBundleGetCountBuffer(agfxIndirectBundle* bundle);
+
+/// @brief Prepares an agfxIndirectBundle for execution. No-op on D3D12 (ExecuteIndirect reads the commands/count buffers directly);
+///        kept as a real call so call sites don't need to branch per backend.
+/// @param computePass A pointer to the agfxComputePass to record the preparation on.
+/// @param bundle A pointer to the agfxIndirectBundle to prepare.
+/// @param executeInfo A pointer to an agfxIndirectBundleExecuteInfo structure describing the execution.
+void agfxComputePassPrepareIndirectBundle(agfxComputePass* computePass, agfxIndirectBundle* bundle, const agfxIndirectBundleExecuteInfo* executeInfo);
+
+/// @brief Executes an agfxIndirectBundle of type DRAW, DRAW_INDEXED, or DRAW_MESH.
+/// @param renderPass A pointer to the agfxRenderPass to record the execution on.
+/// @param bundle A pointer to the agfxIndirectBundle to execute.
+/// @param executeInfo A pointer to an agfxIndirectBundleExecuteInfo structure describing the execution.
+void agfxRenderPassExecuteIndirectBundle(agfxRenderPass* renderPass, agfxIndirectBundle* bundle, const agfxIndirectBundleExecuteInfo* executeInfo);
+
+/// @brief Executes an agfxIndirectBundle of type DISPATCH.
+/// @param computePass A pointer to the agfxComputePass to record the execution on.
+/// @param bundle A pointer to the agfxIndirectBundle to execute.
+/// @param executeInfo A pointer to an agfxIndirectBundleExecuteInfo structure describing the execution.
+void agfxComputePassExecuteIndirectBundle(agfxComputePass* computePass, agfxIndirectBundle* bundle, const agfxIndirectBundleExecuteInfo* executeInfo);
 
 // Compute pass
 /// @brief Begins a new agfxComputePass on the specified command buffer, used for compute dispatches and copy/blit operations.

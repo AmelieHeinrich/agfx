@@ -392,4 +392,120 @@ struct __agfx_draw_id { uint id; };
 #define AGFX_DECLARE_DRAW_ID() ConstantBuffer<__agfx_draw_id> __agfx_draw_id_binding : register(b1)
 #define AGFX_DRAW_ID() __agfx_draw_id_binding.id
 
+// Indirect bundles
+//
+// Command struct field order must match agfxDrawIndexedCommand (agfx.h): drawID is the leading
+// field. The D3D12 command signature declares the drawID CONSTANT argument at index 0 and the
+// terminal DRAW_INDEXED argument at index 1, so the argument buffer's per-command memory layout is
+// [drawID, D3D12_DRAW_INDEXED_ARGUMENTS-shaped fields...].
+class AGFXIndirectDrawIndexedBundle
+{
+    AGFXRWByteAddressBuffer commands;
+    AGFXRWByteAddressBuffer count;
+
+    static AGFXIndirectDrawIndexedBundle Create(uint64_t bundleHandle)
+    {
+        AGFXIndirectDrawIndexedBundle b;
+        b.commands = AGFXRWByteAddressBuffer::Create((ResourceHandle)(bundleHandle & 0xFFFFFFFF));
+        b.count    = AGFXRWByteAddressBuffer::Create((ResourceHandle)(bundleHandle >> 32));
+        return b;
+    }
+
+    // commandOffset/countIndex are in command-struct/uint32 units, matching agfxIndirectBundleExecuteInfo.
+    void DrawIndexed(uint commandOffset, uint countIndex, uint drawId, uint indexCount, uint instanceCount, uint firstIndex, int vertexOffset, uint firstInstance)
+    {
+        uint slot;
+        count.InterlockedAdd(countIndex * 4, 1, slot);
+        uint byteOffset = (commandOffset + slot) * 24; // sizeof(agfxDrawIndexedCommand): 6 x 4 bytes
+        commands.Store(byteOffset + 0,  drawId);
+        commands.Store(byteOffset + 4,  indexCount);
+        commands.Store(byteOffset + 8,  instanceCount);
+        commands.Store(byteOffset + 12, firstIndex);
+        commands.Store(byteOffset + 16, (uint)vertexOffset);
+        commands.Store(byteOffset + 20, firstInstance);
+    }
+};
+
+// Command struct field order must match agfxDrawCommand (agfx.h): drawID leading, matching
+// AGFXIndirectDrawIndexedBundle's note above.
+class AGFXIndirectDrawBundle
+{
+    AGFXRWByteAddressBuffer commands;
+    AGFXRWByteAddressBuffer count;
+
+    static AGFXIndirectDrawBundle Create(uint64_t bundleHandle)
+    {
+        AGFXIndirectDrawBundle b;
+        b.commands = AGFXRWByteAddressBuffer::Create((ResourceHandle)(bundleHandle & 0xFFFFFFFF));
+        b.count    = AGFXRWByteAddressBuffer::Create((ResourceHandle)(bundleHandle >> 32));
+        return b;
+    }
+
+    void Draw(uint commandOffset, uint countIndex, uint drawId, uint vertexCount, uint instanceCount, uint firstVertex, uint firstInstance)
+    {
+        uint slot;
+        count.InterlockedAdd(countIndex * 4, 1, slot);
+        uint byteOffset = (commandOffset + slot) * 20; // sizeof(agfxDrawCommand): 5 x 4 bytes
+        commands.Store(byteOffset + 0,  drawId);
+        commands.Store(byteOffset + 4,  vertexCount);
+        commands.Store(byteOffset + 8,  instanceCount);
+        commands.Store(byteOffset + 12, firstVertex);
+        commands.Store(byteOffset + 16, firstInstance);
+    }
+};
+
+// Command struct field order must match agfxDrawMeshCommand (agfx.h): drawID leading, matching
+// AGFXIndirectDrawIndexedBundle's note above.
+class AGFXIndirectDrawMeshBundle
+{
+    AGFXRWByteAddressBuffer commands;
+    AGFXRWByteAddressBuffer count;
+
+    static AGFXIndirectDrawMeshBundle Create(uint64_t bundleHandle)
+    {
+        AGFXIndirectDrawMeshBundle b;
+        b.commands = AGFXRWByteAddressBuffer::Create((ResourceHandle)(bundleHandle & 0xFFFFFFFF));
+        b.count    = AGFXRWByteAddressBuffer::Create((ResourceHandle)(bundleHandle >> 32));
+        return b;
+    }
+
+    void DrawMesh(uint commandOffset, uint countIndex, uint drawId, uint groupSizeX, uint groupSizeY, uint groupSizeZ)
+    {
+        uint slot;
+        count.InterlockedAdd(countIndex * 4, 1, slot);
+        uint byteOffset = (commandOffset + slot) * 16; // sizeof(agfxDrawMeshCommand): 4 x 4 bytes
+        commands.Store(byteOffset + 0,  drawId);
+        commands.Store(byteOffset + 4,  groupSizeX);
+        commands.Store(byteOffset + 8,  groupSizeY);
+        commands.Store(byteOffset + 12, groupSizeZ);
+    }
+};
+
+// agfxDispatchCommand has no drawID field - plain indirect compute dispatch is expected to carry
+// its own addressing scheme (SV_DispatchThreadID plus a caller-managed per-dispatch data buffer),
+// so no CONSTANT/drawID patch stage exists for this bundle type. See notes/mdi.md open question #5.
+class AGFXIndirectDispatchBundle
+{
+    AGFXRWByteAddressBuffer commands;
+    AGFXRWByteAddressBuffer count;
+
+    static AGFXIndirectDispatchBundle Create(uint64_t bundleHandle)
+    {
+        AGFXIndirectDispatchBundle b;
+        b.commands = AGFXRWByteAddressBuffer::Create((ResourceHandle)(bundleHandle & 0xFFFFFFFF));
+        b.count    = AGFXRWByteAddressBuffer::Create((ResourceHandle)(bundleHandle >> 32));
+        return b;
+    }
+
+    void Dispatch(uint commandOffset, uint countIndex, uint groupCountX, uint groupCountY, uint groupCountZ)
+    {
+        uint slot;
+        count.InterlockedAdd(countIndex * 4, 1, slot);
+        uint byteOffset = (commandOffset + slot) * 12; // sizeof(agfxDispatchCommand): 3 x 4 bytes
+        commands.Store(byteOffset + 0, groupCountX);
+        commands.Store(byteOffset + 4, groupCountY);
+        commands.Store(byteOffset + 8, groupCountZ);
+    }
+};
+
 #endif

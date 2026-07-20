@@ -25,3 +25,8 @@ struct Camera {
 
     void Update(const bool* keyState, float mouseDx, float mouseDy, float dt);
 };
+
+// Extracts the 6 frustum planes (left, right, bottom, top, near, far) from a view-projection
+// matrix, Gribb-Hartmann style. Each plane is (normal.xyz, distance), with the interior of the
+// frustum on the positive side. Used by the GPU-driven culling compute pass.
+void ExtractFrustumPlanes(const glm::mat4& viewProj, glm::vec4 planes[6]);

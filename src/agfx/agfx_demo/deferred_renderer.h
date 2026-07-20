@@ -14,12 +14,26 @@
 #include "csm.h"
 #include "ssao.h"
 #include "reflections.h"
+#include "culling.h"
 
 struct SSAOSettings {
     bool enabled = true;
     float radius = 0.5f;
     float bias = 0.025f;
     float power = 1.5f;
+};
+
+struct GPUDrivenSettings {
+    bool enabled = true;
+    // Stops updating the frustum used for culling, while the camera keeps moving freely - lets you
+    // fly outside the frozen frustum and see GPU-driven culling visibly drop/reintroduce primitives.
+    bool freezeFrustum = false;
+};
+
+struct DebugSettings {
+    // Draws each scene primitive's world-space AABB as a wireframe box, unoccluded, over the HDR
+    // output - lets you visually verify the bounds GPU-driven culling tests against.
+    bool drawBoundingBoxes = false;
 };
 
 struct ReflectionSettings {
@@ -50,6 +64,16 @@ public:
     void RecreateShadowTargets(agfxDevice* device, uint32_t resolution);
 
     void RenderGBuffer(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const GltfScene& scene, const Camera& camera, uint32_t frameSlot);
+    // GPU-driven culling step (reset count buffer, frustum-cull, prepare the indirect bundle). Split
+    // out from RenderGBuffer so it can get its own GPU profiler scope; call before RenderGBuffer
+    // whenever gpuDrivenSettings.enabled is true, and only then - RenderGBuffer detects readiness
+    // via gbufferIndirectBundle/indirectPrimitiveCount and falls back to the CPU path otherwise.
+    void CullGBuffer(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const GltfScene& scene, const Camera& camera);
+    void SetupIndirectBundle(agfxDevice* device, uint32_t primitiveCount);
+    // Builds the debug AABB wireframe vertex buffer from scene.primitives' bounds. Call once after
+    // the scene is loaded (bounds are static). Safe to call again if the scene changes.
+    void SetupDebugBoundingBoxes(agfxDevice* device, const GltfScene& scene);
+    void RenderDebugBoundingBoxes(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const Camera& camera);
     void RenderSSAO(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const Camera& camera, uint32_t frameSlot);
     void RenderShadows(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const GltfScene& scene, const Camera& camera, const LightSettings& light, uint32_t frameSlot);
     void RenderReflections(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const GltfScene& scene, const Camera& camera, const LightSettings& light, uint32_t frameSlot);
@@ -113,6 +137,27 @@ public:
     agfxShaderModule* gbufferPS = nullptr;
     agfxRenderPipeline* gbufferPipelineCullBack = nullptr;
     agfxRenderPipeline* gbufferPipelineCullNone = nullptr;
+
+    // GPU-driven culling (compute) + indirect GBuffer draw
+    GPUDrivenSettings gpuDrivenSettings;
+    AgfxCulling* culling = nullptr;
+    agfxShaderModule* gbufferIndirectVS = nullptr;
+    agfxShaderModule* gbufferIndirectPS = nullptr;
+    agfxRenderPipeline* gbufferIndirectPipeline = nullptr;
+    agfxIndirectBundle* gbufferIndirectBundle = nullptr;
+    agfxBuffer* indirectCountResetBuffer = nullptr;
+    uint32_t indirectPrimitiveCount = 0;
+    glm::mat4 frozenViewProj = glm::mat4(1.0f);
+    bool hasFrozenViewProj = false;
+
+    // Debug AABB wireframe overlay
+    DebugSettings debugSettings;
+    agfxShaderModule* debugLinesVS = nullptr;
+    agfxShaderModule* debugLinesPS = nullptr;
+    agfxRenderPipeline* debugLinesPipeline = nullptr;
+    agfxBuffer* debugLineVertexBuffer = nullptr;
+    agfxBufferView* debugLineVertexBufferView = nullptr;
+    uint32_t debugLineVertexCount = 0;
 
     // Lighting pipeline
     agfxShaderModule* lightingVS = nullptr;

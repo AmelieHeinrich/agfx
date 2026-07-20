@@ -294,9 +294,20 @@ struct agfxDevice {
     ID3D12InfoQueue* d3d12InfoQueue;
 
     ID3D12RootSignature* globalRootSignature;
+    ID3D12CommandSignature* indirectSignatures[4]; // indexed by agfxIndirectBundleType
 
     agfxDescriptorManager* descriptorManager;
 };
+
+static uint32_t agfxIndirectBundleTypeStride(agfxIndirectBundleType type) {
+    switch (type) {
+        case AGFX_INDIRECT_BUNDLE_TYPE_DRAW: return sizeof(agfxDrawCommand);
+        case AGFX_INDIRECT_BUNDLE_TYPE_DRAW_INDEXED: return sizeof(agfxDrawIndexedCommand);
+        case AGFX_INDIRECT_BUNDLE_TYPE_DRAW_MESH: return sizeof(agfxDrawMeshCommand);
+        case AGFX_INDIRECT_BUNDLE_TYPE_DISPATCH: return sizeof(agfxDispatchCommand);
+        default: return 0;
+    }
+}
 
 agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo) {
     agfxDevice* device = (agfxDevice*)createInfo->allocate(sizeof(agfxDevice));
@@ -385,6 +396,39 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo) {
     device->d3d12Device->CreateRootSignature(0, signatureBlob->GetBufferPointer(), signatureBlob->GetBufferSize(), IID_PPV_ARGS(&device->globalRootSignature));
     if (signatureBlob) signatureBlob->Release();
     if (errorBlob) errorBlob->Release();
+
+    // Indirect command signatures: one per bundle type. Argument 0 (when present) is the drawID
+    // CONSTANT patch into root param 1, argument 1 is the terminal draw/dispatch stage - so the
+    // argument buffer's per-command memory layout is [drawID, drawArguments...] (drawID leading),
+    // matching agfxDrawCommand/agfxDrawIndexedCommand/agfxDrawMeshCommand's field order.
+    auto createIndirectSignature = [&](agfxIndirectBundleType type, D3D12_INDIRECT_ARGUMENT_TYPE terminalType) {
+        uint32_t stride = agfxIndirectBundleTypeStride(type);
+
+        D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[2] = {};
+        UINT argumentCount = 0;
+
+        if (type != AGFX_INDIRECT_BUNDLE_TYPE_DISPATCH) {
+            argumentDescs[argumentCount].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
+            argumentDescs[argumentCount].Constant.RootParameterIndex = 1;
+            argumentDescs[argumentCount].Constant.DestOffsetIn32BitValues = 0;
+            argumentDescs[argumentCount].Constant.Num32BitValuesToSet = 1;
+            argumentCount++;
+        }
+        argumentDescs[argumentCount].Type = terminalType;
+        argumentCount++;
+
+        D3D12_COMMAND_SIGNATURE_DESC signatureDesc = {};
+        signatureDesc.pArgumentDescs = argumentDescs;
+        signatureDesc.NumArgumentDescs = argumentCount;
+        signatureDesc.ByteStride = stride;
+        device->d3d12Device->CreateCommandSignature(&signatureDesc, type != AGFX_INDIRECT_BUNDLE_TYPE_DISPATCH ? device->globalRootSignature : nullptr, IID_PPV_ARGS(&device->indirectSignatures[type]));
+    };
+
+    createIndirectSignature(AGFX_INDIRECT_BUNDLE_TYPE_DRAW, D3D12_INDIRECT_ARGUMENT_TYPE_DRAW);
+    createIndirectSignature(AGFX_INDIRECT_BUNDLE_TYPE_DRAW_INDEXED, D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED);
+    createIndirectSignature(AGFX_INDIRECT_BUNDLE_TYPE_DRAW_MESH, D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH);
+    createIndirectSignature(AGFX_INDIRECT_BUNDLE_TYPE_DISPATCH, D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH);
+
     return device;
 }
 
@@ -392,6 +436,9 @@ void agfxDeviceDestroy(agfxDevice* device) {
     if (device->descriptorManager) {
         device->descriptorManager->~agfxDescriptorManager();
         device->createInfo.free(device->descriptorManager);
+    }
+    for (uint32_t i = 0; i < 4; ++i) {
+        if (device->indirectSignatures[i]) device->indirectSignatures[i]->Release();
     }
     if (device->globalRootSignature) device->globalRootSignature->Release();
     if (device->d3d12InfoQueue) device->d3d12InfoQueue->Release();
@@ -1791,6 +1838,121 @@ void agfxComputePassEnd(agfxComputePass* computePass) {
     computePass->device->createInfo.tempFree(computePass);
 }
 
+// Indirect bundle
+struct agfxIndirectBundle {
+    agfxIndirectBundleCreateInfo createInfo;
+    agfxBuffer* commandsBuffer;
+    agfxBufferView* commandsBufferView;
+    agfxBuffer* countBuffer;
+    agfxBufferView* countBufferView;
+    uint32_t stride;
+};
+
+agfxIndirectBundle* agfxIndirectBundleCreate(agfxDevice* device, const agfxIndirectBundleCreateInfo* createInfo) {
+    agfxIndirectBundle* bundle = (agfxIndirectBundle*)device->createInfo.allocate(sizeof(agfxIndirectBundle));
+    memset(bundle, 0, sizeof(agfxIndirectBundle));
+    memcpy(&bundle->createInfo, createInfo, sizeof(agfxIndirectBundleCreateInfo));
+    bundle->stride = agfxIndirectBundleTypeStride(createInfo->type);
+
+    agfxBufferCreateInfo commandsBufferInfo = {};
+    commandsBufferInfo.size = (uint64_t)createInfo->maxCommandCount * bundle->stride;
+    commandsBufferInfo.stride = bundle->stride;
+    commandsBufferInfo.usage = (agfxBufferUsage)(AGFX_BUFFER_USAGE_SHADER_READ | AGFX_BUFFER_USAGE_SHADER_WRITE);
+    commandsBufferInfo.memoryType = AGFX_BUFFER_MEMORY_TYPE_GPU_ONLY;
+    bundle->commandsBuffer = agfxBufferCreate(device, &commandsBufferInfo);
+
+    agfxBufferCreateInfo countBufferInfo = {};
+    countBufferInfo.size = (uint64_t)createInfo->maxCountCount * sizeof(uint32_t);
+    countBufferInfo.stride = sizeof(uint32_t);
+    countBufferInfo.usage = (agfxBufferUsage)(AGFX_BUFFER_USAGE_SHADER_READ | AGFX_BUFFER_USAGE_SHADER_WRITE);
+    countBufferInfo.memoryType = AGFX_BUFFER_MEMORY_TYPE_GPU_ONLY;
+    bundle->countBuffer = agfxBufferCreate(device, &countBufferInfo);
+
+    agfxBufferViewCreateInfo commandsViewInfo = {};
+    commandsViewInfo.buffer = bundle->commandsBuffer;
+    commandsViewInfo.type = AGFX_BUFFER_VIEW_TYPE_RAW;
+    commandsViewInfo.writeable = true;
+    bundle->commandsBufferView = agfxBufferViewCreate(device, &commandsViewInfo);
+
+    agfxBufferViewCreateInfo countViewInfo = {};
+    countViewInfo.buffer = bundle->countBuffer;
+    countViewInfo.type = AGFX_BUFFER_VIEW_TYPE_RAW;
+    countViewInfo.writeable = true;
+    bundle->countBufferView = agfxBufferViewCreate(device, &countViewInfo);
+
+    return bundle;
+}
+
+void agfxIndirectBundleDestroy(agfxDevice* device, agfxIndirectBundle* bundle) {
+    if (bundle->commandsBufferView) agfxBufferViewDestroy(device, bundle->commandsBufferView);
+    if (bundle->commandsBuffer) agfxBufferDestroy(device, bundle->commandsBuffer);
+    if (bundle->countBufferView) agfxBufferViewDestroy(device, bundle->countBufferView);
+    if (bundle->countBuffer) agfxBufferDestroy(device, bundle->countBuffer);
+    device->createInfo.free(bundle);
+}
+
+uint64_t agfxIndirectBundleGetHandle(agfxIndirectBundle* bundle) {
+    return ((uint64_t)agfxBufferViewGetHandle(bundle->countBufferView) << 32) | agfxBufferViewGetHandle(bundle->commandsBufferView);
+}
+
+agfxBuffer* agfxIndirectBundleGetCommandsBuffer(agfxIndirectBundle* bundle) {
+    return bundle->commandsBuffer;
+}
+
+agfxBuffer* agfxIndirectBundleGetCountBuffer(agfxIndirectBundle* bundle) {
+    return bundle->countBuffer;
+}
+
+void agfxComputePassPrepareIndirectBundle(agfxComputePass* computePass, agfxIndirectBundle* bundle, const agfxIndirectBundleExecuteInfo* executeInfo) {
+    // No-op on D3D12: ExecuteIndirect reads the commands/count buffers directly. Kept as a real
+    // call so callers don't need to branch per backend (Metal's ICB-conversion pass does the real
+    // work here).
+    (void)computePass;
+    (void)bundle;
+    (void)executeInfo;
+}
+
+void agfxRenderPassExecuteIndirectBundle(agfxRenderPass* renderPass, agfxIndirectBundle* bundle, const agfxIndirectBundleExecuteInfo* executeInfo) {
+    ID3D12GraphicsCommandList* commandList = renderPass->commandBuffer->d3d12CommandList;
+
+    commandList->SetGraphicsRootSignature(renderPass->commandBuffer->device->globalRootSignature);
+    commandList->SetPipelineState(executeInfo->renderPipeline->d3d12PipelineState);
+    commandList->IASetPrimitiveTopology(agfxTopologyToD3D12PrimitiveTopology(executeInfo->renderPipeline->createInfo.topology));
+    commandList->SetGraphicsRoot32BitConstants(0, sizeof(executeInfo->pushConstants) / 4, executeInfo->pushConstants, 0);
+
+    if (executeInfo->indexBuffer) {
+        D3D12_INDEX_BUFFER_VIEW ibv = {};
+        ibv.BufferLocation = executeInfo->indexBuffer->d3d12Resource->GetGPUVirtualAddress();
+        ibv.Format = executeInfo->indexBuffer->createInfo.stride == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
+        ibv.SizeInBytes = executeInfo->indexBuffer->createInfo.size;
+        commandList->IASetIndexBuffer(&ibv);
+    }
+
+    commandList->ExecuteIndirect(
+        renderPass->commandBuffer->device->indirectSignatures[bundle->createInfo.type],
+        executeInfo->maxCommandCount,
+        bundle->commandsBuffer->d3d12Resource,
+        (UINT64)executeInfo->commandOffset * bundle->stride,
+        bundle->countBuffer->d3d12Resource,
+        (UINT64)executeInfo->countIndex * sizeof(uint32_t));
+}
+
+void agfxComputePassExecuteIndirectBundle(agfxComputePass* computePass, agfxIndirectBundle* bundle, const agfxIndirectBundleExecuteInfo* executeInfo) {
+    ID3D12GraphicsCommandList* commandList = computePass->commandBuffer->d3d12CommandList;
+
+    commandList->SetComputeRootSignature(computePass->device->globalRootSignature);
+    commandList->SetPipelineState(executeInfo->computePipeline->d3d12PipelineState);
+    commandList->SetComputeRoot32BitConstants(0, sizeof(executeInfo->pushConstants) / 4, executeInfo->pushConstants, 0);
+
+    commandList->ExecuteIndirect(
+        computePass->device->indirectSignatures[bundle->createInfo.type],
+        executeInfo->maxCommandCount,
+        bundle->commandsBuffer->d3d12Resource,
+        (UINT64)executeInfo->commandOffset * bundle->stride,
+        bundle->countBuffer->d3d12Resource,
+        (UINT64)executeInfo->countIndex * sizeof(uint32_t));
+}
+
 // Stuff
 D3D12_RENDER_TARGET_VIEW_DESC agfxTextureViewTypeToD3D12RenderTargetViewDesc(agfxRenderTargetCreateInfo* createInfo) {
     D3D12_RENDER_TARGET_VIEW_DESC rtvDesc = {};
@@ -1851,6 +2013,7 @@ D3D12_UNORDERED_ACCESS_VIEW_DESC agfxBufferViewTypeToD3D12UnorderedAccessViewDes
         uavDesc.Buffer.FirstElement = createInfo->offset / 4;
         uavDesc.Buffer.NumElements = createInfo->buffer->createInfo.size / 4;
         uavDesc.Buffer.StructureByteStride = 0;
+        uavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
     } else if (createInfo->type == AGFX_BUFFER_VIEW_TYPE_STRUCTURED) {
         uavDesc.Buffer.FirstElement = createInfo->offset / createInfo->buffer->createInfo.stride;
         uavDesc.Buffer.NumElements = createInfo->buffer->createInfo.size / createInfo->buffer->createInfo.stride;

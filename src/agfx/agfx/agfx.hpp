@@ -214,6 +214,23 @@ namespace agfx
         void ResetInstances() { agfxAccelerationStructureResetInstances(mHandle); }
     };
 
+    /// @brief Owns an agfxIndirectBundle (GPU-driven indirect draw/dispatch commands buffer + count
+    /// buffer). Fill it from a compute shader via the AGFXIndirectDraw*Bundle HLSL helpers, then
+    /// replay it with RenderPass::ExecuteIndirectBundle or ComputePass::ExecuteIndirectBundle.
+    class IndirectBundle : public Handle<agfxIndirectBundle, agfxIndirectBundleDestroy>
+    {
+    public:
+        using Handle::Handle;
+
+        /// @brief Bindless handle to pass into the AGFXIndirectDraw*Bundle::Create HLSL helpers.
+        uint64_t GetHandle() const { return agfxIndirectBundleGetHandle(mHandle); }
+
+        /// @brief Non-owning access to the underlying commands/count buffers, e.g. for barriers.
+        /// The bundle retains ownership; do not wrap these in an owning Buffer.
+        agfxBuffer* CommandsBuffer() const { return agfxIndirectBundleGetCommandsBuffer(mHandle); }
+        agfxBuffer* CountBuffer() const { return agfxIndirectBundleGetCountBuffer(mHandle); }
+    };
+
     class ShaderModule : public Handle<agfxShaderModule, agfxShaderModuleDestroy>
     {
     public:
@@ -314,6 +331,19 @@ namespace agfx
             agfxComputePassWriteCompactedSizeToBuffer(mPass, as, dstBuffer, dstBufferOffset);
         }
 
+        /// @brief Prepares an indirect bundle for execution. No-op on D3D12; real work (ICB build)
+        /// on Metal. Call within the same compute pass that culled/generated the bundle's commands.
+        void PrepareIndirectBundle(IndirectBundle& bundle, const agfxIndirectBundleExecuteInfo& info)
+        {
+            agfxComputePassPrepareIndirectBundle(mPass, bundle, &info);
+        }
+
+        /// @brief Replays an AGFX_INDIRECT_BUNDLE_TYPE_DISPATCH bundle.
+        void ExecuteIndirectBundle(IndirectBundle& bundle, const agfxIndirectBundleExecuteInfo& info)
+        {
+            agfxComputePassExecuteIndirectBundle(mPass, bundle, &info);
+        }
+
         operator agfxComputePass*() const { return mPass; }
 
     private:
@@ -368,6 +398,12 @@ namespace agfx
         void DrawMesh(uint32_t groupCountX, uint32_t groupCountY = 1, uint32_t groupCountZ = 1)
         {
             agfxRenderPassDrawMesh(mPass, groupCountX, groupCountY, groupCountZ);
+        }
+
+        /// @brief Replays an AGFX_INDIRECT_BUNDLE_TYPE_DRAW/DRAW_INDEXED/DRAW_MESH bundle.
+        void ExecuteIndirectBundle(IndirectBundle& bundle, const agfxIndirectBundleExecuteInfo& info)
+        {
+            agfxRenderPassExecuteIndirectBundle(mPass, bundle, &info);
         }
 
         operator agfxRenderPass*() const { return mPass; }
@@ -576,6 +612,11 @@ namespace agfx
         AccelerationStructure CreateAccelerationStructure(const agfxAccelerationStructureCreateInfo& info)
         {
             return AccelerationStructure(mDevice, agfxAccelerationStructureCreate(mDevice, &info));
+        }
+
+        IndirectBundle CreateIndirectBundle(const agfxIndirectBundleCreateInfo& info)
+        {
+            return IndirectBundle(mDevice, agfxIndirectBundleCreate(mDevice, &info));
         }
 
         /// @brief Creates a destination acceleration structure sized for a compaction pass.

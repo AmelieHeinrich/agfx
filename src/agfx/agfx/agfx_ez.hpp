@@ -203,6 +203,34 @@ namespace agfx::ez
         std::array<std::optional<agfx::BufferView>, 3> mViews;
     };
 
+    /// @brief GPU-driven indirect draw/dispatch commands buffer + count buffer. Fill it from a
+    /// compute pass via the AGFXIndirectDraw*Bundle HLSL helpers, then replay it with
+    /// Context::ExecuteIndirectBundle (draw/drawIndexed/drawMesh) or, for dispatch bundles, the raw
+    /// agfx::ComputePass::ExecuteIndirectBundle on a compute pass opened via GetCurrentCommandBuffer().
+    class IndirectBundle
+    {
+    public:
+        IndirectBundle() = default;
+        explicit IndirectBundle(agfx::IndirectBundle&& bundle) : mBundle(std::move(bundle)) {}
+
+        IndirectBundle(const IndirectBundle&) = delete;
+        IndirectBundle& operator=(const IndirectBundle&) = delete;
+        IndirectBundle(IndirectBundle&&) = default;
+        IndirectBundle& operator=(IndirectBundle&&) = default;
+
+        agfx::IndirectBundle& Raw() { return mBundle; }
+
+        /// @brief Bindless handle to pass into the AGFXIndirectDraw*Bundle::Create HLSL helpers.
+        uint64_t GetHandle() const { return const_cast<agfx::IndirectBundle&>(mBundle).GetHandle(); }
+
+        agfxResourceState State() const { return mTracker.Current(); }
+        void SetState(agfxResourceState state) { mTracker.Set(state); }
+
+    private:
+        agfx::IndirectBundle mBundle;
+        ResourceStateTracker mTracker; // shared for both the commands and count buffers, which always transition together
+    };
+
     /// @brief A built acceleration structure (bottom- or top-level). Created and built in one call
     /// via Context::CreateBottomLevel / CreateTopLevel, which hide scratch allocation, residency,
     /// and the AS->AS build barriers. Bind() gives the bindless handle to write into a ShaderBindings.
@@ -880,6 +908,15 @@ namespace agfx::ez
             mActiveRenderPass->DrawMesh(groupCountX, groupCountY, groupCountZ);
         }
 
+        /// @brief Replays an AGFX_INDIRECT_BUNDLE_TYPE_DRAW/DRAW_INDEXED/DRAW_MESH bundle. For
+        /// DISPATCH bundles, use the raw agfx::ComputePass::ExecuteIndirectBundle instead (via
+        /// GetCurrentCommandBuffer().BeginComputePass()) -- ez has no compute-pass sugar, by design.
+        void ExecuteIndirectBundle(IndirectBundle& bundle, const agfxIndirectBundleExecuteInfo& info)
+        {
+            assert(mActiveRenderPass);
+            mActiveRenderPass->ExecuteIndirectBundle(bundle.Raw(), info);
+        }
+
         // --- One-call resource creation (immediate, synchronous upload) ---
 
         Texture2D CreateTexture2D(uint32_t width, uint32_t height, agfxTextureFormat format, agfxTextureUsage usage,
@@ -927,6 +964,17 @@ namespace agfx::ez
         {
             agfxBufferUsage usage = static_cast<agfxBufferUsage>(AGFX_BUFFER_USAGE_SHADER_READ | (shaderWritable ? AGFX_BUFFER_USAGE_SHADER_WRITE : 0));
             return CreateInitializedBuffer(data, size, stride, usage);
+        }
+
+        /// @brief Creates an agfxIndirectBundle sized for maxCommandCount commands and maxCountCount
+        /// independent count slots (see agfx.h's notes on multiple count slots per bundle).
+        IndirectBundle CreateIndirectBundle(agfxIndirectBundleType type, uint32_t maxCommandCount, uint32_t maxCountCount = 1)
+        {
+            agfxIndirectBundleCreateInfo info{};
+            info.type = type;
+            info.maxCommandCount = maxCommandCount;
+            info.maxCountCount = maxCountCount;
+            return IndirectBundle(mDevice->CreateIndirectBundle(info));
         }
 
         // --- Ray tracing (acceleration structures) ---
@@ -1015,6 +1063,21 @@ namespace agfx::ez
             }
             mCommandBuffers[mFrameSlot].BufferBarrier(buf.Raw(), buf.State(), newState, true);
             buf.SetState(newState);
+        }
+
+        /// @brief Transitions both the commands and count buffers of an indirect bundle together --
+        /// they always move in lockstep (UAV while being culled/prepared, INDIRECT_ARGUMENT while
+        /// being replayed). Uses the raw C API directly since the bundle owns these buffers itself
+        /// (see agfx::IndirectBundle::CommandsBuffer/CountBuffer).
+        void TransitionIndirectBundle(IndirectBundle& bundle, agfxResourceState newState)
+        {
+            if (bundle.State() == newState) {
+                return;
+            }
+            agfxCommandBuffer* cmd = mCommandBuffers[mFrameSlot].Get();
+            agfxCommandBufferBufferBarrier(cmd, bundle.Raw().CommandsBuffer(), bundle.State(), newState, true);
+            agfxCommandBufferBufferBarrier(cmd, bundle.Raw().CountBuffer(), bundle.State(), newState, true);
+            bundle.SetState(newState);
         }
 
         // --- Raw access for advanced/mixed use ---

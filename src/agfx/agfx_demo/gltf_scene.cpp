@@ -15,6 +15,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+#include <cfloat>
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -324,6 +325,13 @@ bool GltfScene::Load(agfxDevice* device, agfxCommandQueue* queue, const char* pa
             allVertices.insert(allVertices.end(), localVerts.begin(), localVerts.end());
             allIndices.insert(allIndices.end(), localIndices.begin(), localIndices.end());
 
+            glm::vec3 boundsMin(FLT_MAX), boundsMax(-FLT_MAX);
+            for (const SceneVertex& v : localVerts) {
+                glm::vec3 worldPos = glm::vec3(worldMatrix * glm::vec4(v.pos, 1.0f));
+                boundsMin = glm::min(boundsMin, worldPos);
+                boundsMax = glm::max(boundsMax, worldPos);
+            }
+
             ScenePrimitive scenePrim = {};
             scenePrim.vertexOffset = vertexOffset;
             scenePrim.vertexCount = (uint32_t)vertexCount;
@@ -331,6 +339,8 @@ bool GltfScene::Load(agfxDevice* device, agfxCommandQueue* queue, const char* pa
             scenePrim.indexCount = (uint32_t)localIndices.size();
             scenePrim.worldMatrix = worldMatrix;
             scenePrim.materialIndex = prim->material ? (int)(prim->material - data->materials) : -1;
+            scenePrim.boundsMin = boundsMin;
+            scenePrim.boundsMax = boundsMax;
             primitives.push_back(scenePrim);
         }
     }
@@ -381,6 +391,9 @@ bool GltfScene::Load(agfxDevice* device, agfxCommandQueue* queue, const char* pa
         inst.worldMatrix = prim.worldMatrix;
         inst.vertexOffset = prim.vertexOffset;
         inst.indexOffset = prim.indexOffset;
+        inst.indexCount = prim.indexCount;
+        inst.boundsMin = prim.boundsMin;
+        inst.boundsMax = prim.boundsMax;
         if (prim.materialIndex >= 0 && prim.materialIndex < (int)materials.size()) {
             const SceneMaterial& mat = materials[prim.materialIndex];
             inst.albedoTex = textures[mat.albedoTexIndex].handle;

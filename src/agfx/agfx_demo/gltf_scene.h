@@ -33,6 +33,10 @@ struct ScenePrimitive {
     uint32_t indexCount = 0;
     glm::mat4 worldMatrix = glm::mat4(1.0f);
     int materialIndex = -1;
+    // World-space AABB, computed at load time from the primitive's transformed vertex positions.
+    // Consumed by the GPU-driven culling compute shader (via GPUSceneInstance below).
+    glm::vec3 boundsMin = glm::vec3(0.0f);
+    glm::vec3 boundsMax = glm::vec3(0.0f);
 };
 
 struct SceneTexture {
@@ -54,7 +58,12 @@ struct GPUSceneInstance {
     uint32_t metallicRoughnessTex = 0;
     float metallicFactor = 1.0f;
     float roughnessFactor = 1.0f;
+    uint32_t indexCount = 0;
+    // World-space AABB, used by the GPU-driven culling compute shader (culling.hlsl).
+    glm::vec3 boundsMin = glm::vec3(0.0f);
     float _pad0 = 0.0f;
+    glm::vec3 boundsMax = glm::vec3(0.0f);
+    float _pad1 = 0.0f;
 };
 
 class GltfScene {

@@ -159,6 +159,8 @@ int main()
 
     DeferredRenderer renderer;
     renderer.Init(device, agfxSwapChainGetFormat(swapChain), (uint32_t)drawableWidth, (uint32_t)drawableHeight);
+    renderer.SetupIndirectBundle(device, (uint32_t)scene.primitives.size());
+    renderer.SetupDebugBoundingBoxes(device, scene);
 
     Camera camera;
     camera.position = glm::vec3(0.0f, 2.0f, 0.0f);
@@ -198,6 +200,11 @@ int main()
                     SDL_GetWindowSizeInPixels(window, &drawableWidth, &drawableHeight);
                     drainGPU();
                     agfxSwapChainResize(device, swapChain, (uint32_t)drawableWidth, (uint32_t)drawableHeight);
+                    // Keep swapChainCreateInfo's dimensions in sync so the HDR-toggle path below
+                    // (which destroys and recreates the swapchain from this struct) doesn't recreate
+                    // it at whatever size was current at startup instead of the live window size.
+                    swapChainCreateInfo.width = (uint32_t)drawableWidth;
+                    swapChainCreateInfo.height = (uint32_t)drawableHeight;
                     renderer.Resize(device, (uint32_t)drawableWidth, (uint32_t)drawableHeight);
                     camera.aspect = (float)drawableWidth / (float)drawableHeight;
                 } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_RIGHT && !io.WantCaptureMouse) {
@@ -234,6 +241,13 @@ int main()
             ImGui::SliderFloat("PCSS Max Penumbra (UV)", &renderer.csm.pcssMaxPenumbraUV, 0.001f, 0.1f);
             ImGui::SliderFloat("Depth Bias Constant", &renderer.csm.depthBiasConstant, 0.0f, 0.01f);
             ImGui::Checkbox("Visualize Cascades", &renderer.csm.visualizeCascades);
+            ImGui::Separator();
+            ImGui::Text("GBuffer");
+            ImGui::Checkbox("GPU-Driven Culling", &renderer.gpuDrivenSettings.enabled);
+            ImGui::BeginDisabled(!renderer.gpuDrivenSettings.enabled);
+            ImGui::Checkbox("Freeze Frustum", &renderer.gpuDrivenSettings.freezeFrustum);
+            ImGui::EndDisabled();
+            ImGui::Checkbox("Draw Bounding Boxes", &renderer.debugSettings.drawBoundingBoxes);
             ImGui::Separator();
             ImGui::Text("SSAO");
             ImGui::Checkbox("Enabled", &renderer.ssaoSettings.enabled);
@@ -291,6 +305,12 @@ int main()
             agfxCommandBufferReset(commandBuffer);
             agfxCommandBufferBegin(commandBuffer);
 
+            if (renderer.gpuDrivenSettings.enabled) {
+                profiler.BeginScope(commandBuffer, "Culling");
+                renderer.CullGBuffer(device, commandBuffer, scene, camera);
+                profiler.EndScope(commandBuffer);
+            }
+
             profiler.BeginScope(commandBuffer, "GBuffer");
             renderer.RenderGBuffer(device, commandBuffer, scene, camera, frameSlot);
             profiler.EndScope(commandBuffer);
@@ -310,6 +330,12 @@ int main()
             profiler.BeginScope(commandBuffer, "Lighting");
             renderer.RenderLighting(device, commandBuffer, light, camera, frameSlot);
             profiler.EndScope(commandBuffer);
+
+            if (renderer.debugSettings.drawBoundingBoxes) {
+                profiler.BeginScope(commandBuffer, "Debug AABBs");
+                renderer.RenderDebugBoundingBoxes(device, commandBuffer, camera);
+                profiler.EndScope(commandBuffer);
+            }
 
             agfxTexture* backBuffer = agfxSwapChainAcquireNextTexture(swapChain);
             agfxCommandBufferTextureBarrier(commandBuffer, backBuffer, AGFX_RESOURCE_STATE_PRESENT, AGFX_RESOURCE_STATE_RENDER_TARGET, 0, 0, false);

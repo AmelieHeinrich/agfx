@@ -24,7 +24,11 @@ struct GPUSceneInstance {
     uint metallicRoughnessTex;
     float metallicFactor;
     float roughnessFactor;
+    uint indexCount;
+    float3 boundsMin;
     float _pad0;
+    float3 boundsMax;
+    float _pad1;
 };
 
 struct ReflectionsSceneConstants {

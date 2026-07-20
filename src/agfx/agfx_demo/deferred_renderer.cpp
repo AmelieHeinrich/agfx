@@ -14,6 +14,7 @@
 #include <cfloat>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -28,6 +29,18 @@ struct GBufferPushConstants {
     uint32_t vertexOffset;
     float metallicFactor;
     float roughnessFactor;
+};
+
+struct GBufferIndirectPushConstants {
+    uint32_t vertexBuffer;
+    uint32_t gpuScene;
+    uint32_t textureSampler;
+    uint32_t sceneCB;
+};
+
+struct DebugLinesPushConstants {
+    glm::mat4 viewProj;
+    uint32_t vertexBuffer;
 };
 
 struct GBufferSceneConstants {
@@ -348,6 +361,57 @@ void DeferredRenderer::Init(agfxDevice* device, agfxTextureFormat swapchainForma
     gbufferPipelineCullBack = CreateGBufferPipeline(device, AGFX_CULL_MODE_BACK);
     gbufferPipelineCullNone = CreateGBufferPipeline(device, AGFX_CULL_MODE_NONE);
 
+    gbufferIndirectVS = CompileShader(device, gbufferSource, AGFX_SHADER_STAGE_VERTEX, "main_vs_indirect", AGFX_SHADER_MODULE_TYPE_VERTEX);
+    gbufferIndirectPS = CompileShader(device, gbufferSource, AGFX_SHADER_STAGE_FRAGMENT, "main_ps_indirect", AGFX_SHADER_MODULE_TYPE_FRAGMENT);
+
+    agfxRenderPipelineCreateInfo gbufferIndirectInfo = {};
+    gbufferIndirectInfo.name = "GBuffer Indirect Pipeline";
+    gbufferIndirectInfo.fillMode = AGFX_FILL_MODE_SOLID;
+    gbufferIndirectInfo.cullMode = AGFX_CULL_MODE_NONE; // per-primitive double-sidedness can't vary within one ExecuteIndirect call
+    gbufferIndirectInfo.frontFace = AGFX_FRONT_FACE_COUNTER_CLOCKWISE;
+    gbufferIndirectInfo.topology = AGFX_TOPOLOGY_TRIANGLES;
+    gbufferIndirectInfo.depthTestEnable = true;
+    gbufferIndirectInfo.depthWriteEnable = true;
+    gbufferIndirectInfo.depthCompareOp = AGFX_COMPARISON_FUNCTION_LESS;
+    gbufferIndirectInfo.depthFormat = AGFX_TEXTURE_FORMAT_DEPTH32F;
+    gbufferIndirectInfo.colorFormats[0] = AGFX_TEXTURE_FORMAT_RGBA8_UNORM;
+    gbufferIndirectInfo.colorFormats[1] = AGFX_TEXTURE_FORMAT_RGBA8_UNORM;
+    gbufferIndirectInfo.colorFormats[2] = AGFX_TEXTURE_FORMAT_RGBA8_UNORM;
+    gbufferIndirectInfo.colorAttachmentCount = 3;
+    gbufferIndirectInfo.vertexShader = gbufferIndirectVS;
+    gbufferIndirectInfo.fragmentShader = gbufferIndirectPS;
+    gbufferIndirectPipeline = agfxRenderPipelineCreate(device, &gbufferIndirectInfo);
+
+    culling = new AgfxCulling(device);
+
+    uint32_t resetZero = 0;
+    agfxBufferCreateInfo resetInfo = {};
+    resetInfo.size = sizeof(uint32_t);
+    resetInfo.stride = sizeof(uint32_t);
+    resetInfo.usage = AGFX_BUFFER_USAGE_SHADER_READ;
+    resetInfo.memoryType = AGFX_BUFFER_MEMORY_TYPE_CPU_TO_GPU;
+    indirectCountResetBuffer = agfxBufferCreate(device, &resetInfo);
+    void* resetDst = agfxBufferMap(indirectCountResetBuffer);
+    memcpy(resetDst, &resetZero, sizeof(resetZero));
+    agfxBufferUnmap(indirectCountResetBuffer);
+
+    std::string debugLinesSource = ReadFile((std::string(kDataDir) + "shaders/demo/debug_lines.hlsl").c_str());
+    debugLinesVS = CompileShader(device, debugLinesSource, AGFX_SHADER_STAGE_VERTEX, "main_vs", AGFX_SHADER_MODULE_TYPE_VERTEX);
+    debugLinesPS = CompileShader(device, debugLinesSource, AGFX_SHADER_STAGE_FRAGMENT, "main_ps", AGFX_SHADER_MODULE_TYPE_FRAGMENT);
+
+    agfxRenderPipelineCreateInfo debugLinesInfo = {};
+    debugLinesInfo.name = "Debug Lines Pipeline";
+    debugLinesInfo.fillMode = AGFX_FILL_MODE_SOLID;
+    debugLinesInfo.cullMode = AGFX_CULL_MODE_NONE;
+    debugLinesInfo.frontFace = AGFX_FRONT_FACE_COUNTER_CLOCKWISE;
+    debugLinesInfo.topology = AGFX_TOPOLOGY_LINES;
+    debugLinesInfo.depthFormat = AGFX_TEXTURE_FORMAT_UNKNOWN; // unoccluded overlay, drawn straight onto the HDR target
+    debugLinesInfo.colorFormats[0] = AGFX_TEXTURE_FORMAT_RGBA16F;
+    debugLinesInfo.colorAttachmentCount = 1;
+    debugLinesInfo.vertexShader = debugLinesVS;
+    debugLinesInfo.fragmentShader = debugLinesPS;
+    debugLinesPipeline = agfxRenderPipelineCreate(device, &debugLinesInfo);
+
     std::string lightingSource = ReadFile((std::string(kDataDir) + "shaders/demo/deferred_lighting.hlsl").c_str());
     lightingVS = CompileShader(device, lightingSource, AGFX_SHADER_STAGE_VERTEX, "main_vs", AGFX_SHADER_MODULE_TYPE_VERTEX);
     lightingPS = CompileShader(device, lightingSource, AGFX_SHADER_STAGE_FRAGMENT, "main_ps", AGFX_SHADER_MODULE_TYPE_FRAGMENT);
@@ -514,6 +578,19 @@ void DeferredRenderer::Shutdown(agfxDevice* device)
     if (gbufferVS) agfxShaderModuleDestroy(device, gbufferVS);
     if (gbufferPS) agfxShaderModuleDestroy(device, gbufferPS);
 
+    if (gbufferIndirectBundle) agfxIndirectBundleDestroy(device, gbufferIndirectBundle);
+    if (indirectCountResetBuffer) agfxBufferDestroy(device, indirectCountResetBuffer);
+    if (culling) { delete culling; culling = nullptr; }
+    if (gbufferIndirectPipeline) agfxRenderPipelineDestroy(device, gbufferIndirectPipeline);
+    if (gbufferIndirectVS) agfxShaderModuleDestroy(device, gbufferIndirectVS);
+    if (gbufferIndirectPS) agfxShaderModuleDestroy(device, gbufferIndirectPS);
+
+    if (debugLineVertexBufferView) agfxBufferViewDestroy(device, debugLineVertexBufferView);
+    if (debugLineVertexBuffer) agfxBufferDestroy(device, debugLineVertexBuffer);
+    if (debugLinesPipeline) agfxRenderPipelineDestroy(device, debugLinesPipeline);
+    if (debugLinesVS) agfxShaderModuleDestroy(device, debugLinesVS);
+    if (debugLinesPS) agfxShaderModuleDestroy(device, debugLinesPS);
+
     if (lightingPipeline) agfxRenderPipelineDestroy(device, lightingPipeline);
     if (lightingVS) agfxShaderModuleDestroy(device, lightingVS);
     if (lightingPS) agfxShaderModuleDestroy(device, lightingPS);
@@ -559,6 +636,156 @@ void DeferredRenderer::RecreateTonemapPipeline(agfxDevice* device, agfxTextureFo
     tonemapOutputFormat = swapchainFormat;
 }
 
+void DeferredRenderer::SetupIndirectBundle(agfxDevice* device, uint32_t primitiveCount)
+{
+    if (gbufferIndirectBundle && indirectPrimitiveCount == primitiveCount) return;
+    if (gbufferIndirectBundle) agfxIndirectBundleDestroy(device, gbufferIndirectBundle);
+
+    agfxIndirectBundleCreateInfo bundleInfo = {};
+    bundleInfo.type = AGFX_INDIRECT_BUNDLE_TYPE_DRAW_INDEXED;
+    bundleInfo.maxCommandCount = primitiveCount;
+    bundleInfo.maxCountCount = 1;
+    gbufferIndirectBundle = agfxIndirectBundleCreate(device, &bundleInfo);
+    indirectPrimitiveCount = primitiveCount;
+}
+
+void DeferredRenderer::SetupDebugBoundingBoxes(agfxDevice* device, const GltfScene& scene)
+{
+    if (debugLineVertexBufferView) agfxBufferViewDestroy(device, debugLineVertexBufferView);
+    if (debugLineVertexBuffer) agfxBufferDestroy(device, debugLineVertexBuffer);
+
+    std::vector<glm::vec3> vertices;
+    vertices.reserve(scene.primitives.size() * 24);
+
+    for (const ScenePrimitive& prim : scene.primitives) {
+        glm::vec3 mn = prim.boundsMin;
+        glm::vec3 mx = prim.boundsMax;
+        glm::vec3 corners[8] = {
+            glm::vec3(mn.x, mn.y, mn.z), glm::vec3(mx.x, mn.y, mn.z),
+            glm::vec3(mx.x, mx.y, mn.z), glm::vec3(mn.x, mx.y, mn.z),
+            glm::vec3(mn.x, mn.y, mx.z), glm::vec3(mx.x, mn.y, mx.z),
+            glm::vec3(mx.x, mx.y, mx.z), glm::vec3(mn.x, mx.y, mx.z),
+        };
+        static const int kEdges[12][2] = {
+            {0,1},{1,2},{2,3},{3,0}, // bottom face
+            {4,5},{5,6},{6,7},{7,4}, // top face
+            {0,4},{1,5},{2,6},{3,7}, // verticals
+        };
+        for (auto& edge : kEdges) {
+            vertices.push_back(corners[edge[0]]);
+            vertices.push_back(corners[edge[1]]);
+        }
+    }
+
+    debugLineVertexCount = (uint32_t)vertices.size();
+    if (debugLineVertexCount == 0) {
+        debugLineVertexBuffer = nullptr;
+        debugLineVertexBufferView = nullptr;
+        return;
+    }
+
+    agfxBufferCreateInfo vbInfo = {};
+    vbInfo.size = vertices.size() * sizeof(glm::vec3);
+    vbInfo.stride = sizeof(glm::vec3);
+    vbInfo.usage = AGFX_BUFFER_USAGE_SHADER_READ;
+    vbInfo.memoryType = AGFX_BUFFER_MEMORY_TYPE_CPU_TO_GPU;
+    debugLineVertexBuffer = agfxBufferCreate(device, &vbInfo);
+    void* dst = agfxBufferMap(debugLineVertexBuffer);
+    memcpy(dst, vertices.data(), vbInfo.size);
+    agfxBufferUnmap(debugLineVertexBuffer);
+
+    agfxBufferViewCreateInfo vbViewInfo = {};
+    vbViewInfo.buffer = debugLineVertexBuffer;
+    vbViewInfo.type = AGFX_BUFFER_VIEW_TYPE_STRUCTURED;
+    debugLineVertexBufferView = agfxBufferViewCreate(device, &vbViewInfo);
+
+    agfxDeviceMakeResourcesResident(device);
+}
+
+void DeferredRenderer::RenderDebugBoundingBoxes(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const Camera& camera)
+{
+    (void)device;
+    if (!debugSettings.drawBoundingBoxes || !debugLineVertexBufferView || debugLineVertexCount == 0) return;
+
+    agfxCommandBufferTextureBarrier(cmdBuffer, hdrTexture, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, AGFX_RESOURCE_STATE_RENDER_TARGET, 0, 0, true);
+
+    agfxRenderPassCreateInfo passInfo = {};
+    passInfo.colorAttachmentCount = 1;
+    passInfo.colorAttachments[0].renderTarget = hdrRT;
+    passInfo.colorAttachments[0].loadOp = AGFX_LOAD_OPERATION_LOAD;
+    passInfo.colorAttachments[0].storeOp = AGFX_STORE_OPERATION_STORE;
+    passInfo.hasDepthAttachment = false;
+    passInfo.width = width;
+    passInfo.height = height;
+    passInfo.name = "Debug Bounding Boxes";
+
+    agfxRenderPass* pass = agfxRenderPassBegin(cmdBuffer, &passInfo);
+    agfxRenderPassSetViewport(pass, 0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
+    agfxRenderPassSetScissor(pass, 0, 0, width, height);
+    agfxRenderPassSetPipeline(pass, debugLinesPipeline);
+
+    DebugLinesPushConstants pc = {};
+    pc.viewProj = camera.GetProj() * camera.GetView();
+    pc.vertexBuffer = (uint32_t)agfxBufferViewGetHandle(debugLineVertexBufferView);
+    agfxRenderPassPushConstants(pass, &pc, sizeof(pc));
+
+    agfxRenderPassDraw(pass, debugLineVertexCount, 1, 0, 0);
+
+    agfxRenderPassEnd(pass);
+
+    agfxCommandBufferTextureBarrier(cmdBuffer, hdrTexture, AGFX_RESOURCE_STATE_RENDER_TARGET, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, 0, 0, true);
+}
+
+void DeferredRenderer::CullGBuffer(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const GltfScene& scene, const Camera& camera)
+{
+    if (!gbufferIndirectBundle || indirectPrimitiveCount != scene.primitives.size()) return;
+
+    agfxBuffer* commandsBuffer = agfxIndirectBundleGetCommandsBuffer(gbufferIndirectBundle);
+    agfxBuffer* countBuffer = agfxIndirectBundleGetCountBuffer(gbufferIndirectBundle);
+
+    glm::mat4 viewProj;
+    if (gpuDrivenSettings.freezeFrustum) {
+        if (!hasFrozenViewProj) {
+            frozenViewProj = camera.GetProj() * camera.GetView();
+            hasFrozenViewProj = true;
+        }
+        viewProj = frozenViewProj;
+    } else {
+        hasFrozenViewProj = false;
+        viewProj = camera.GetProj() * camera.GetView();
+    }
+    glm::vec4 frustumPlanes[6];
+    ExtractFrustumPlanes(viewProj, frustumPlanes);
+
+    // One compute pass/encoder for the whole culling step: reset the count buffer, transition it
+    // to UAV, cull, UAV-barrier the results, then prepare the bundle (no-op on D3D12; real work on
+    // Metal's ICB-conversion path).
+    agfxComputePass* pass = agfxComputePassBegin(cmdBuffer, "GBuffer Culling");
+
+    agfxComputePassCopyBufferToBuffer(pass, indirectCountResetBuffer, countBuffer, 0, 0, sizeof(uint32_t));
+    // The copy implicitly promotes countBuffer to COPY_DEST; the culling shader's atomic
+    // appends need it as a UAV, so this has to be a real state transition, not just a UAV barrier.
+    agfxCommandBufferBufferBarrier(cmdBuffer, countBuffer, AGFX_RESOURCE_STATE_COPY_DEST, AGFX_RESOURCE_STATE_UNORDERED_ACCESS, true);
+
+    culling->Cull(pass, scene.gpuSceneBufferView, indirectPrimitiveCount, frustumPlanes, agfxIndirectBundleGetHandle(gbufferIndirectBundle));
+
+    agfxComputePassBufferUAVBarrier(pass, commandsBuffer);
+    agfxComputePassBufferUAVBarrier(pass, countBuffer);
+
+    agfxIndirectBundleExecuteInfo prepareInfo = {};
+    prepareInfo.countIndex = 0;
+    prepareInfo.commandOffset = 0;
+    prepareInfo.maxCommandCount = indirectPrimitiveCount;
+    prepareInfo.renderPipeline = gbufferIndirectPipeline;
+    prepareInfo.indexBuffer = scene.indexBuffer;
+    agfxComputePassPrepareIndirectBundle(pass, gbufferIndirectBundle, &prepareInfo);
+
+    agfxComputePassEnd(pass);
+
+    agfxCommandBufferBufferBarrier(cmdBuffer, commandsBuffer, AGFX_RESOURCE_STATE_UNORDERED_ACCESS, AGFX_RESOURCE_STATE_INDIRECT_ARGUMENT, true);
+    agfxCommandBufferBufferBarrier(cmdBuffer, countBuffer, AGFX_RESOURCE_STATE_UNORDERED_ACCESS, AGFX_RESOURCE_STATE_INDIRECT_ARGUMENT, true);
+}
+
 void DeferredRenderer::RenderGBuffer(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const GltfScene& scene, const Camera& camera, uint32_t frameSlot)
 {
     agfxCommandBufferTextureBarrier(cmdBuffer, albedoTexture, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, AGFX_RESOURCE_STATE_RENDER_TARGET, 0, 0, true);
@@ -572,6 +799,8 @@ void DeferredRenderer::RenderGBuffer(agfxDevice* device, agfxCommandBuffer* cmdB
     memcpy(cbDst, &sceneConstants, sizeof(sceneConstants));
     agfxBufferUnmap(gbufferSceneCB[frameSlot]);
     agfxDeviceMakeResourcesResident(device);
+
+    bool gpuDriven = gpuDrivenSettings.enabled && gbufferIndirectBundle && indirectPrimitiveCount == scene.primitives.size();
 
     agfxRenderPassCreateInfo passInfo = {};
     passInfo.colorAttachmentCount = 3;
@@ -596,27 +825,47 @@ void DeferredRenderer::RenderGBuffer(agfxDevice* device, agfxCommandBuffer* cmdB
     agfxRenderPassSetViewport(pass, 0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f);
     agfxRenderPassSetScissor(pass, 0, 0, width, height);
 
-    for (const ScenePrimitive& prim : scene.primitives) {
-        if (prim.materialIndex < 0 || prim.materialIndex >= (int)scene.materials.size())
-            continue;
-        const SceneMaterial& mat = scene.materials[prim.materialIndex];
+    if (gpuDriven) {
+        agfxRenderPassSetPipeline(pass, gbufferIndirectPipeline);
 
-        agfxRenderPassSetPipeline(pass, mat.doubleSided ? gbufferPipelineCullNone : gbufferPipelineCullBack);
-
-        GBufferPushConstants pc = {};
-        pc.worldMatrix = prim.worldMatrix;
+        GBufferIndirectPushConstants pc = {};
         pc.vertexBuffer = (uint32_t)agfxBufferViewGetHandle(scene.vertexBufferView);
-        pc.albedoTex = scene.textures[mat.albedoTexIndex].handle;
-        pc.normalTex = scene.textures[mat.normalTexIndex].handle;
-        pc.metallicRoughnessTex = scene.textures[mat.metallicRoughnessTexIndex].handle;
+        pc.gpuScene = (uint32_t)agfxBufferViewGetHandle(scene.gpuSceneBufferView);
         pc.textureSampler = (uint32_t)agfxSamplerGetHandle(scene.defaultSampler);
         pc.sceneCB = (uint32_t)agfxBufferViewGetHandle(gbufferSceneCBView[frameSlot]);
-        pc.vertexOffset = prim.vertexOffset;
-        pc.metallicFactor = mat.metallicFactor;
-        pc.roughnessFactor = mat.roughnessFactor;
-        agfxRenderPassPushConstants(pass, &pc, sizeof(pc));
 
-        agfxRenderPassDrawIndexed(pass, scene.indexBuffer, prim.indexCount, 1, prim.indexOffset, 0, 0);
+        agfxIndirectBundleExecuteInfo executeInfo = {};
+        executeInfo.countIndex = 0;
+        executeInfo.commandOffset = 0;
+        executeInfo.maxCommandCount = indirectPrimitiveCount;
+        memcpy(executeInfo.pushConstants, &pc, sizeof(pc));
+        executeInfo.renderPipeline = gbufferIndirectPipeline;
+        executeInfo.indexBuffer = scene.indexBuffer;
+
+        agfxRenderPassExecuteIndirectBundle(pass, gbufferIndirectBundle, &executeInfo);
+    } else {
+        for (const ScenePrimitive& prim : scene.primitives) {
+            if (prim.materialIndex < 0 || prim.materialIndex >= (int)scene.materials.size())
+                continue;
+            const SceneMaterial& mat = scene.materials[prim.materialIndex];
+
+            agfxRenderPassSetPipeline(pass, mat.doubleSided ? gbufferPipelineCullNone : gbufferPipelineCullBack);
+
+            GBufferPushConstants pc = {};
+            pc.worldMatrix = prim.worldMatrix;
+            pc.vertexBuffer = (uint32_t)agfxBufferViewGetHandle(scene.vertexBufferView);
+            pc.albedoTex = scene.textures[mat.albedoTexIndex].handle;
+            pc.normalTex = scene.textures[mat.normalTexIndex].handle;
+            pc.metallicRoughnessTex = scene.textures[mat.metallicRoughnessTexIndex].handle;
+            pc.textureSampler = (uint32_t)agfxSamplerGetHandle(scene.defaultSampler);
+            pc.sceneCB = (uint32_t)agfxBufferViewGetHandle(gbufferSceneCBView[frameSlot]);
+            pc.vertexOffset = prim.vertexOffset;
+            pc.metallicFactor = mat.metallicFactor;
+            pc.roughnessFactor = mat.roughnessFactor;
+            agfxRenderPassPushConstants(pass, &pc, sizeof(pc));
+
+            agfxRenderPassDrawIndexed(pass, scene.indexBuffer, prim.indexCount, 1, prim.indexOffset, 0, 0);
+        }
     }
 
     agfxRenderPassEnd(pass);

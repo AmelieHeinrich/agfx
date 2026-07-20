@@ -64,3 +64,24 @@ void Camera::Update(const bool* keyState, float mouseDx, float mouseDy, float dt
 
     position += move * speed * dt;
 }
+
+void ExtractFrustumPlanes(const glm::mat4& viewProj, glm::vec4 planes[6])
+{
+    // glm matrices are column-major with clip = M * v, so plane rows are combinations of the
+    // matrix's own rows (Gribb-Hartmann). glm::mat4 access is m[col][row], so "row i" below reads
+    // element i from every column.
+    auto row = [&](int i) { return glm::vec4(viewProj[0][i], viewProj[1][i], viewProj[2][i], viewProj[3][i]); };
+    glm::vec4 r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
+
+    planes[0] = r3 + r0; // left
+    planes[1] = r3 - r0; // right
+    planes[2] = r3 + r1; // bottom
+    planes[3] = r3 - r1; // top
+    planes[4] = r2;      // near (ZO depth range: near plane is row2 = 0)
+    planes[5] = r3 - r2; // far
+
+    for (int i = 0; i < 6; ++i) {
+        float len = glm::length(glm::vec3(planes[i]));
+        if (len > 0.0f) planes[i] /= len;
+    }
+}
