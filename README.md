@@ -1,6 +1,8 @@
 # AGFX : Amelie's graphics library
 
 ![](.github/image.png)
+![](.github/ez.png)
+![](.github/tests.png)
 
 AGFX is a small (<10k LOC) wrapper over D3D12 and Metal 4, designed to make it easier for indie developers to ship game on multiple platforms. It's MIT licensed.
 
@@ -55,6 +57,7 @@ In this repository you can find a few different folders:
 - agfx_imgui: ImGui backend for AGFX
 - agfx_shader: Simple shader compiler library to go from HLSL -> AGFX bytecode
 - agfx_shader_cli: A CLI to compile AGFX shaders
+- agfx_tests: An exhaustive RHI test suite 
 - data/shaders: Helpful HLSL header include, and shaders for agfx_imgui and the demo app
 
 ## AI Notice
@@ -83,6 +86,7 @@ On Windows:
 - agfx_shader: dxcompiler.lib
 
 ## Changelogs
+- v1.3.0: Tests update
 - v1.2.0: Multi draw indirect update
 - v1.1.0: Raytracing update
 - v1.0.0: Base Metal4/D3D12 backends with basic features, missing raytracing/draw indirect. Fully usable for a video game.
