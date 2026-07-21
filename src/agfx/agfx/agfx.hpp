@@ -276,6 +276,9 @@ namespace agfx
 
         void TextureUAVBarrier(Texture& texture) { agfxComputePassTextureUAVBarrier(mPass, texture); }
         void BufferUAVBarrier(Buffer& buffer) { agfxComputePassBufferUAVBarrier(mPass, buffer); }
+        /// @brief Overload for buffers this wrapper does not own -- notably
+        /// IndirectBundle::CommandsBuffer()/CountBuffer(), which are raw handles by design.
+        void BufferUAVBarrier(agfxBuffer* buffer) { agfxComputePassBufferUAVBarrier(mPass, buffer); }
 
         void CopyTextureToBuffer(Texture& texture, Buffer& buffer, uint64_t bufferOffset, const agfxTextureRegion& region, uint32_t mipLevel, uint32_t layer, uint32_t bytesPerRow, uint32_t bytesPerImage)
         {
@@ -427,6 +430,13 @@ namespace agfx
         }
 
         void BufferBarrier(Buffer& buffer, agfxResourceState oldState, agfxResourceState newState, bool agglomerate = true)
+        {
+            agfxCommandBufferBufferBarrier(mHandle, buffer, oldState, newState, agglomerate);
+        }
+
+        /// @brief Overload for buffers this wrapper does not own -- notably
+        /// IndirectBundle::CommandsBuffer()/CountBuffer(), which are raw handles by design.
+        void BufferBarrier(agfxBuffer* buffer, agfxResourceState oldState, agfxResourceState newState, bool agglomerate = true)
         {
             agfxCommandBufferBufferBarrier(mHandle, buffer, oldState, newState, agglomerate);
         }

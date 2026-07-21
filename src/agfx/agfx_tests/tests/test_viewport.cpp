@@ -13,10 +13,10 @@
 // lands the triangle in the wrong quadrant. Keeping the scissor full-target is what separates this
 // test from test_scissor_rect.cpp — the clipping there must come from the viewport alone.
 //
-// There is no Ez variant: ez only exposes the combined SetViewportScissor, which cannot set a
-// viewport and scissor that disagree, so it cannot express what this test is checking.
 
 #include "../test_gpu.h"
+
+#include <agfx/agfx_ez.hpp>
 
 namespace
 {
@@ -190,6 +190,64 @@ AGFX_TEST_TEXTURE(Viewport, Cpp, kWidth, kHeight)
     Image image;
     const bool readOk = ReadbackTexture2D(device.Get(), queue, target, kWidth, kHeight, kFormat,
                                           AGFX_RESOURCE_STATE_RENDER_TARGET, image);
+    AGFX_EXPECT_MSG(readOk, "texture readback failed");
+
+    ExpectImageMatchesGolden(ctx, kGolden, image);
+}
+
+AGFX_TEST_TEXTURE(Viewport, Ez, kWidth, kHeight)
+{
+    agfx::ez::ContextCreateInfo contextInfo{};
+    contextInfo.deviceInfo = DefaultDeviceCreateInfo();
+    contextInfo.windowHandle = nullptr; // headless: no swap chain
+    contextInfo.width = kWidth;
+    contextInfo.height = kHeight;
+    agfx::ez::Context context(contextInfo);
+
+    const CompiledShader vsShader = CompileTestShader("triangle.hlsl", AGFX_SHADER_STAGE_VERTEX, "main_vs");
+    const CompiledShader psShader = CompileTestShader("triangle.hlsl", AGFX_SHADER_STAGE_FRAGMENT, "main_ps");
+    AGFX_EXPECT_MSG(vsShader.Valid(), "failed to compile triangle.hlsl:main_vs");
+    AGFX_EXPECT_MSG(psShader.Valid(), "failed to compile triangle.hlsl:main_ps");
+
+    agfx::Device& device = context.GetDevice();
+
+    agfx::ShaderModule vsModule(device.Get(),
+        CreateShaderModule(device.Get(), vsShader, "main_vs", AGFX_SHADER_MODULE_TYPE_VERTEX));
+    agfx::ShaderModule psModule(device.Get(),
+        CreateShaderModule(device.Get(), psShader, "main_ps", AGFX_SHADER_MODULE_TYPE_FRAGMENT));
+    AGFX_EXPECT_NOT_NULL(vsModule.Get());
+    AGFX_EXPECT_NOT_NULL(psModule.Get());
+
+    agfx::ez::Texture2D target = context.CreateTexture2D(kWidth, kHeight, kFormat,
+                                                         AGFX_TEXTURE_USAGE_COLOR_ATTACHMENT);
+
+    agfx::ez::PipelineDesc desc;
+    desc.name = "test viewport";
+    desc.vertexShader = &vsModule;
+    desc.fragmentShader = &psModule;
+    desc.cullMode = AGFX_CULL_MODE_NONE;
+    desc.depthTestEnable = false;
+    desc.depthWriteEnable = false;
+
+    device.MakeResourcesResident();
+
+    {
+        agfx::ez::Frame frame = context.BeginFrame();
+        context.SetRenderTargets({&target}, nullptr, AGFX_LOAD_OPERATION_CLEAR, kClearColor);
+        // The separate SetViewport/SetScissor is what this test needs: the combined
+        // SetViewportScissor cannot express a quadrant viewport with a wide-open scissor, and the
+        // clipping here has to come from the viewport alone.
+        context.SetViewport(kViewportX, kViewportY, kViewportWidth, kViewportHeight);
+        context.SetScissor(0, 0, kWidth, kHeight);
+        context.SetPipeline(desc);
+        context.Draw(3);
+        context.EndActivePass();
+    }
+    context.DrainGPU();
+
+    Image image;
+    const bool readOk = ReadbackTexture2D(device.Get(), context.GetGraphicsQueue(), target.Raw(),
+                                          kWidth, kHeight, kFormat, target.State(), image);
     AGFX_EXPECT_MSG(readOk, "texture readback failed");
 
     ExpectImageMatchesGolden(ctx, kGolden, image);

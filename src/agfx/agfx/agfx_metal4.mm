@@ -1377,7 +1377,7 @@ agfxRenderPass* agfxRenderPassBegin(agfxCommandBuffer* cmdBuffer, const agfxRend
         descriptor.colorAttachments[i].texture = createInfo->colorAttachments[i].renderTarget->view;
     }
     if (createInfo->hasDepthAttachment) {
-        descriptor.depthAttachment.clearDepth = 1.0f;
+        descriptor.depthAttachment.clearDepth = createInfo->depthAttachment.clearDepth;
         descriptor.depthAttachment.loadAction = agfxLoadActionToMTL(createInfo->depthAttachment.loadOp);
         descriptor.depthAttachment.storeAction = agfxStoreActionToMTL(createInfo->depthAttachment.storeOp);
         descriptor.depthAttachment.texture = createInfo->depthAttachment.renderTarget->view;

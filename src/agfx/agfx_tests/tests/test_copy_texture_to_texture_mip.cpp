@@ -13,6 +13,8 @@
 
 #include "../test_gpu.h"
 
+#include <agfx/agfx_ez.hpp>
+
 namespace
 {
     using namespace agfxtest;
@@ -215,6 +217,63 @@ AGFX_TEST_TEXTURE(CopyTextureToTextureMip, Cpp, kMipWidth, kMipHeight)
                     "mip 1 readback failed");
     AGFX_EXPECT_MSG(ReadbackTextureSubresource(device.Get(), queue, dest, kBaseWidth, kBaseHeight,
                                                kFormat, AGFX_RESOURCE_STATE_COMMON, 0, 0, mip0),
+                    "mip 0 readback failed");
+    AGFX_EXPECT_MSG(ImageEqualsRgba8(mip1, ExpectedMip1()), "mip 1 is not the seed with the copied window");
+    AGFX_EXPECT_MSG(ImageEqualsRgba8(mip0, destMip0), "the copy disturbed the destination's mip 0");
+
+    ExpectImageMatchesGolden(ctx, kGolden, mip1);
+}
+
+AGFX_TEST_TEXTURE(CopyTextureToTextureMip, Ez, kMipWidth, kMipHeight)
+{
+    agfx::ez::ContextCreateInfo contextInfo{};
+    contextInfo.deviceInfo = DefaultDeviceCreateInfo();
+    contextInfo.windowHandle = nullptr; // headless: no swap chain
+    contextInfo.width = kBaseWidth;
+    contextInfo.height = kBaseHeight;
+    agfx::ez::Context context(contextInfo);
+
+    agfx::Device& device = context.GetDevice();
+
+    agfx::ez::Texture2D source = context.CreateTexture2D(kBaseWidth, kBaseHeight, kFormat,
+                                                         AGFX_TEXTURE_USAGE_SAMPLED, nullptr, 0, kMipLevels);
+    agfx::ez::Texture2D dest = context.CreateTexture2D(kBaseWidth, kBaseHeight, kFormat,
+                                                       AGFX_TEXTURE_USAGE_SAMPLED, nullptr, 0, kMipLevels);
+
+    // Context::UploadTexture is the general form of CreateTexture2D's pixels argument -- it is what
+    // lets ez seed a mip other than 0, which is the whole reason this test now has an Ez flavor.
+    const std::vector<uint8_t> destMip0 = DestPixels(0, kBaseWidth, kBaseHeight);
+    for (uint32_t mip = 0; mip < kMipLevels; ++mip) {
+        const uint32_t width = kBaseWidth >> mip;
+        const uint32_t height = kBaseHeight >> mip;
+        const uint32_t rowBytes = width * kBytesPerPixel;
+        const std::vector<uint8_t> sourcePixels = SourcePixels(mip, width, height);
+        const std::vector<uint8_t> destSeed = DestPixels(mip, width, height);
+        const agfxTextureRegion region{0, 0, 0, width, height, 1};
+        context.UploadTexture(source, region, mip, 0, sourcePixels.data(), rowBytes * height, rowBytes);
+        context.UploadTexture(dest, region, mip, 0, destSeed.data(), rowBytes * height, rowBytes);
+    }
+
+    device.MakeResourcesResident();
+
+    {
+        agfx::ez::Frame frame = context.BeginFrame();
+        // Transitioning one mip rather than the whole texture: the tracker splits, so mip 0 stays in
+        // COMMON and only mip 1 moves. Reading both back below with their own StateAt() is what
+        // proves the split is tracked rather than smeared across the resource.
+        context.TransitionTexture(source, AGFX_RESOURCE_STATE_COPY_SOURCE, kCopyMip, 0);
+        context.TransitionTexture(dest, AGFX_RESOURCE_STATE_COPY_DEST, kCopyMip, 0);
+        context.CopyTextureToTexture(source, dest, CopyRegion(), kCopyMip, 0);
+    }
+    context.DrainGPU();
+
+    Image mip1;
+    Image mip0;
+    AGFX_EXPECT_MSG(ReadbackTextureSubresource(device.Get(), context.GetGraphicsQueue(), dest.Raw(), kMipWidth,
+                                               kMipHeight, kFormat, dest.StateAt(kCopyMip, 0), kCopyMip, 0, mip1),
+                    "mip 1 readback failed");
+    AGFX_EXPECT_MSG(ReadbackTextureSubresource(device.Get(), context.GetGraphicsQueue(), dest.Raw(), kBaseWidth,
+                                               kBaseHeight, kFormat, dest.StateAt(0, 0), 0, 0, mip0),
                     "mip 0 readback failed");
     AGFX_EXPECT_MSG(ImageEqualsRgba8(mip1, ExpectedMip1()), "mip 1 is not the seed with the copied window");
     AGFX_EXPECT_MSG(ImageEqualsRgba8(mip0, destMip0), "the copy disturbed the destination's mip 0");

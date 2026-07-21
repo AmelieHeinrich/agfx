@@ -16,6 +16,8 @@
 
 #include "../test_gpu.h"
 
+#include <agfx/agfx_ez.hpp>
+
 namespace
 {
     using namespace agfxtest;
@@ -181,6 +183,47 @@ AGFX_TEST_BUFFER(CopyTextureToBufferMip, Cpp)
     std::vector<uint8_t> bytes;
     const bool readOk = ReadbackBuffer(device.Get(), queue, dest, kMipBytes,
                                        AGFX_RESOURCE_STATE_COPY_DEST, bytes);
+    AGFX_EXPECT_MSG(readOk, "buffer readback failed");
+    AGFX_EXPECT_MSG(bytes == mip1, "copied bytes are not mip 1's pattern");
+
+    ExpectBufferMatchesGolden(ctx, kGolden, bytes);
+}
+
+AGFX_TEST_BUFFER(CopyTextureToBufferMip, Ez)
+{
+    agfx::ez::ContextCreateInfo contextInfo{};
+    contextInfo.deviceInfo = DefaultDeviceCreateInfo();
+    contextInfo.windowHandle = nullptr; // headless: no swap chain
+    contextInfo.width = kBaseWidth;
+    contextInfo.height = kBaseHeight;
+    agfx::ez::Context context(contextInfo);
+
+    agfx::Device& device = context.GetDevice();
+
+    agfx::ez::Texture2D source = context.CreateTexture2D(kBaseWidth, kBaseHeight, kFormat,
+                                                         AGFX_TEXTURE_USAGE_SAMPLED, nullptr, 0, kMipLevels);
+    // Matches DestInfo(): GPU-only, SHADER_READ | SHADER_WRITE, no initial contents.
+    agfx::ez::Buffer dest = context.CreateStructuredBuffer(nullptr, kMipBytes, kBytesPerPixel, /*shaderWritable*/ true);
+
+    const std::vector<uint8_t> mip0 = MipPixels(0, kBaseWidth, kBaseHeight);
+    const std::vector<uint8_t> mip1 = MipPixels(1, kMipWidth, kMipHeight);
+    context.UploadTexture(source, agfxTextureRegion{0, 0, 0, kBaseWidth, kBaseHeight, 1}, 0, 0, mip0.data(),
+                          (uint32_t)mip0.size(), kBaseWidth * kBytesPerPixel);
+    context.UploadTexture(source, MipRegion(), kCopyMip, 0, mip1.data(), (uint32_t)mip1.size(), kMipRowBytes);
+
+    device.MakeResourcesResident();
+
+    {
+        agfx::ez::Frame frame = context.BeginFrame();
+        context.TransitionTexture(source, AGFX_RESOURCE_STATE_COPY_SOURCE, kCopyMip, 0);
+        context.TransitionBuffer(dest, AGFX_RESOURCE_STATE_COPY_DEST);
+        context.CopyTextureToBuffer(source, dest, 0, MipRegion(), kCopyMip, 0, kMipRowBytes, (uint32_t)kMipBytes);
+    }
+    context.DrainGPU();
+
+    std::vector<uint8_t> bytes;
+    const bool readOk = ReadbackBuffer(device.Get(), context.GetGraphicsQueue(), dest.Raw(), kMipBytes,
+                                       dest.State(), bytes);
     AGFX_EXPECT_MSG(readOk, "buffer readback failed");
     AGFX_EXPECT_MSG(bytes == mip1, "copied bytes are not mip 1's pattern");
 

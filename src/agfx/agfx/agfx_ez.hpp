@@ -15,10 +15,11 @@
 // the last state *this ez layer* moved a resource into via its own calls (SetRenderTargets,
 // resource creation, explicit Transition* calls). It does NOT: see inside shader bindless
 // reads, track resources created directly through raw agfx.hpp/agfx.h (mixing raw and ez
-// creation for the same resource silently defeats tracking for it), operate at subresource
-// (mip/layer) granularity, or infer intra-pass UAV read/write hazards (use the re-exposed
-// TextureUAVBarrier/BufferUAVBarrier on agfx::ComputePass for that). This is convenience for
-// the common "render to it, then sample it next pass" pattern, nothing more.
+// creation for the same resource silently defeats tracking for it), or infer intra-pass UAV
+// read/write hazards (use the re-exposed TextureUAVBarrier/BufferUAVBarrier on agfx::ComputePass
+// for that). It DOES track at subresource (mip/layer) granularity -- TransitionTexture takes an
+// optional mip and layer, so mip-chain patterns are expressible. This is convenience for the
+// common "render to it, then sample it next pass" pattern, nothing more.
 
 #pragma once
 
@@ -28,6 +29,7 @@
 #include <cassert>
 #include <cstring>
 #include <initializer_list>
+#include <memory>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -60,103 +62,286 @@ namespace agfx::ez
         }
     }
 
-    /// @brief Tracks the last agfxResourceState an ez-wrapped resource was transitioned into.
+    /// @brief Selects "every mip" / "every layer" in the subresource-taking ez entry points.
+    inline constexpr uint32_t kAllMips = AGFX_SUBRESOURCE_ALL_MIPS;
+    inline constexpr uint32_t kAllLayers = AGFX_SUBRESOURCE_ALL_LAYERS;
+
+    /// @brief Tracks the last agfxResourceState an ez-wrapped resource was transitioned into, at
+    /// (mip, layer) subresource granularity.
     /// @note Only reflects transitions made through the ez API. See the header's top comment for scope.
+    ///
+    /// The representation is uniform-or-split: while every subresource agrees (the overwhelmingly
+    /// common case, and the only one buffers ever hit) a single agfxResourceState is stored and no
+    /// allocation happens. The first per-subresource transition splits it into one state per
+    /// subresource; it re-collapses as soon as they agree again, so whole-resource transitions stay
+    /// a single barrier.
     class ResourceStateTracker
     {
     public:
-        agfxResourceState Current() const { return mState; }
-        void Set(agfxResourceState state) { mState = state; }
+        /// @brief Sets the subresource grid. Not needed for buffers, which only use the uniform path.
+        void Init(uint32_t mipLevels, uint32_t arrayLayers)
+        {
+            mMipLevels = mipLevels ? mipLevels : 1;
+            mArrayLayers = arrayLayers ? arrayLayers : 1;
+        }
+
+        uint32_t MipLevels() const { return mMipLevels; }
+        uint32_t ArrayLayers() const { return mArrayLayers; }
+
+        /// @brief True while every subresource shares one state, so Current() fully describes it.
+        bool Uniform() const { return mSplit.empty(); }
+
+        /// @brief The shared state. Only meaningful when Uniform(); asserts otherwise.
+        agfxResourceState Current() const
+        {
+            assert(Uniform() && "ResourceStateTracker::Current() on a split tracker -- use At(mip, layer)");
+            return mState;
+        }
+
+        agfxResourceState At(uint32_t mip, uint32_t layer) const
+        {
+            if (Uniform()) {
+                return mState;
+            }
+            return mSplit[Index(mip, layer)];
+        }
+
+        /// @brief Collapses every subresource back onto one state.
+        void Set(agfxResourceState state)
+        {
+            mSplit.clear();
+            mState = state;
+        }
+
+        /// @brief Sets one subresource, splitting the representation if it disagrees with the rest.
+        void SetAt(uint32_t mip, uint32_t layer, agfxResourceState state)
+        {
+            if (Uniform()) {
+                if (mState == state) {
+                    return;
+                }
+                mSplit.assign((size_t)mMipLevels * mArrayLayers, mState);
+            }
+            mSplit[Index(mip, layer)] = state;
+            Collapse();
+        }
 
     private:
+        size_t Index(uint32_t mip, uint32_t layer) const
+        {
+            assert(mip < mMipLevels && layer < mArrayLayers);
+            return (size_t)mip * mArrayLayers + layer;
+        }
+
+        /// @brief Drops back to the uniform representation once every subresource agrees again.
+        void Collapse()
+        {
+            for (agfxResourceState state : mSplit) {
+                if (state != mSplit[0]) {
+                    return;
+                }
+            }
+            mState = mSplit[0];
+            mSplit.clear();
+        }
+
         agfxResourceState mState = AGFX_RESOURCE_STATE_COMMON;
+        uint32_t mMipLevels = 1;
+        uint32_t mArrayLayers = 1;
+        std::vector<agfxResourceState> mSplit; // Empty while uniform.
     };
 
-    /// @brief A 2D texture with lazily created and cached SRV/RTV/UAV views.
-    class Texture2D
+    namespace detail
     {
-    public:
-        Texture2D() = default;
-        Texture2D(agfx::Texture&& texture, const agfxTextureCreateInfo& info)
-            : mTexture(std::move(texture)), mInfo(info)
+        /// @brief Storage and lazily created, cached views shared by every ez texture type.
+        ///
+        /// The public Texture2D/Texture2DArray/Texture3D/TextureCube wrappers differ only in which
+        /// agfxTextureType they are created with and which dimension accessors make sense on them;
+        /// everything below -- view creation, view caching, state tracking -- is identical, so it
+        /// lives here once. Views are cached on their full parameter set rather than one slot each,
+        /// so per-mip UAVs and per-mip render targets coexist with the whole-resource views.
+        class TextureBase
         {
-        }
-
-        Texture2D(const Texture2D&) = delete;
-        Texture2D& operator=(const Texture2D&) = delete;
-        Texture2D(Texture2D&&) = default;
-        Texture2D& operator=(Texture2D&&) = default;
-
-        agfx::Texture& Raw() { return mTexture; }
-        uint32_t Width() const { return mInfo.width; }
-        uint32_t Height() const { return mInfo.height; }
-        agfxTextureFormat Format() const { return mInfo.format; }
-        agfxTextureUsage Usage() const { return mInfo.usage; }
-
-        agfxResourceState State() const { return mTracker.Current(); }
-        void SetState(agfxResourceState state) { mTracker.Set(state); }
-
-        /// @brief The sampled/shader-resource view. Created on first call.
-        agfx::TextureView& SRV()
-        {
-            if (!mSRV) {
-                agfxTextureViewCreateInfo info{};
-                info.texture = mTexture;
-                info.format = mInfo.format;
-                info.type = mInfo.type;
-                info.baseMipLevel = 0;
-                info.mipLevelCount = mInfo.mipLevels;
-                info.baseArrayLayer = 0;
-                info.arrayLayerCount = mInfo.depthOrArrayLayers;
-                info.writeable = 0;
-                mSRV.emplace(mTexture.GetDevice(), agfxTextureViewCreate(mTexture.GetDevice(), &info));
+        public:
+            TextureBase() = default;
+            TextureBase(agfx::Texture&& texture, const agfxTextureCreateInfo& info)
+                : mTexture(std::move(texture)), mInfo(info)
+            {
+                mTracker.Init(info.mipLevels, TrackedLayers(info));
             }
-            return *mSRV;
-        }
 
-        /// @brief The read/write (UAV) view. Requires AGFX_TEXTURE_USAGE_STORAGE at creation. Created on first call.
-        agfx::TextureView& UAV()
-        {
-            assert((mInfo.usage & AGFX_TEXTURE_USAGE_STORAGE) && "Texture2D::UAV() requires AGFX_TEXTURE_USAGE_STORAGE");
-            if (!mUAV) {
-                agfxTextureViewCreateInfo info{};
-                info.texture = mTexture;
-                info.format = mInfo.format;
-                info.type = mInfo.type;
-                info.baseMipLevel = 0;
-                info.mipLevelCount = mInfo.mipLevels;
-                info.baseArrayLayer = 0;
-                info.arrayLayerCount = mInfo.depthOrArrayLayers;
-                info.writeable = 1;
-                mUAV.emplace(mTexture.GetDevice(), agfxTextureViewCreate(mTexture.GetDevice(), &info));
+            TextureBase(const TextureBase&) = delete;
+            TextureBase& operator=(const TextureBase&) = delete;
+            TextureBase(TextureBase&&) = default;
+            TextureBase& operator=(TextureBase&&) = default;
+
+            agfx::Texture& Raw() { return mTexture; }
+            const agfxTextureCreateInfo& Info() const { return mInfo; }
+            uint32_t Width() const { return mInfo.width; }
+            uint32_t Height() const { return mInfo.height; }
+            uint32_t MipLevels() const { return mInfo.mipLevels; }
+            agfxTextureFormat Format() const { return mInfo.format; }
+            agfxTextureUsage Usage() const { return mInfo.usage; }
+
+            ResourceStateTracker& Tracker() { return mTracker; }
+            const ResourceStateTracker& Tracker() const { return mTracker; }
+
+            /// @brief The whole-resource state. Only valid while no per-subresource transition has
+            /// split it; use StateAt(mip, layer) in mip-chain-style code that transitions one at a time.
+            agfxResourceState State() const { return mTracker.Current(); }
+            agfxResourceState StateAt(uint32_t mip, uint32_t layer) const { return mTracker.At(mip, layer); }
+            void SetState(agfxResourceState state) { mTracker.Set(state); }
+
+            /// @brief A sampled/shader-resource view. Defaults to the whole resource. Cached per subrange.
+            agfx::TextureView& SRV(uint32_t baseMip = 0, uint32_t mipCount = kAllMips,
+                                   uint32_t baseLayer = 0, uint32_t layerCount = kAllLayers)
+            {
+                return View(baseMip, mipCount, baseLayer, layerCount, /*writeable*/ false);
             }
-            return *mUAV;
-        }
 
-        /// @brief The render-target (RTV/DSV) view. Requires a COLOR_ATTACHMENT or DEPTH_STENCIL_ATTACHMENT usage bit. Created on first call.
-        agfx::RenderTarget& RTV()
-        {
-            assert((mInfo.usage & (AGFX_TEXTURE_USAGE_COLOR_ATTACHMENT | AGFX_TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT)) &&
-                   "Texture2D::RTV() requires a color or depth-stencil attachment usage bit");
-            if (!mRTV) {
+            /// @brief A read/write (UAV) view. Requires AGFX_TEXTURE_USAGE_STORAGE at creation.
+            /// Pass (mip, 1) to get the single-mip UAV that mip-chain generation needs.
+            agfx::TextureView& UAV(uint32_t baseMip = 0, uint32_t mipCount = kAllMips,
+                                   uint32_t baseLayer = 0, uint32_t layerCount = kAllLayers)
+            {
+                assert((mInfo.usage & AGFX_TEXTURE_USAGE_STORAGE) && "UAV() requires AGFX_TEXTURE_USAGE_STORAGE");
+                return View(baseMip, mipCount, baseLayer, layerCount, /*writeable*/ true);
+            }
+
+            /// @brief A render-target (RTV/DSV) view for one mip of one layer. Requires a
+            /// COLOR_ATTACHMENT or DEPTH_STENCIL_ATTACHMENT usage bit. Cached per (mip, layer).
+            agfx::RenderTarget& RTV(uint32_t mipLevel = 0, uint32_t arrayLayer = 0)
+            {
+                assert((mInfo.usage & (AGFX_TEXTURE_USAGE_COLOR_ATTACHMENT | AGFX_TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT)) &&
+                       "RTV() requires a color or depth-stencil attachment usage bit");
+                for (auto& entry : mRenderTargets) {
+                    if (entry.first.mipLevel == mipLevel && entry.first.arrayLayer == arrayLayer) {
+                        return *entry.second;
+                    }
+                }
+
                 agfxRenderTargetCreateInfo info{};
                 info.texture = mTexture;
                 info.format = AGFX_TEXTURE_FORMAT_UNKNOWN;
-                info.mipLevel = 0;
-                info.arrayLayer = 0;
+                info.mipLevel = mipLevel;
+                info.arrayLayer = arrayLayer;
                 info.isDepth = (mInfo.usage & AGFX_TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT) ? 1 : 0;
-                mRTV.emplace(mTexture.GetDevice(), agfxRenderTargetCreate(mTexture.GetDevice(), &info));
-            }
-            return *mRTV;
-        }
 
-    private:
-        agfx::Texture mTexture;
-        agfxTextureCreateInfo mInfo{};
-        ResourceStateTracker mTracker;
-        std::optional<agfx::TextureView> mSRV;
-        std::optional<agfx::TextureView> mUAV;
-        std::optional<agfx::RenderTarget> mRTV;
+                mRenderTargets.emplace_back(RenderTargetKey{mipLevel, arrayLayer},
+                                            std::make_unique<agfx::RenderTarget>(
+                                                mTexture.GetDevice(), agfxRenderTargetCreate(mTexture.GetDevice(), &info)));
+                return *mRenderTargets.back().second;
+            }
+
+        protected:
+            /// @brief How many subresource layers to track. A 3D texture's depthOrArrayLayers is
+            /// depth, not layers -- its slices are addressed by copy-region z and it has exactly one
+            /// subresource layer, so it must not be tracked as depthOrArrayLayers of them.
+            static uint32_t TrackedLayers(const agfxTextureCreateInfo& info)
+            {
+                return info.type == AGFX_TEXTURE_TYPE_3D ? 1u : info.depthOrArrayLayers;
+            }
+
+        private:
+            struct ViewKey
+            {
+                uint32_t baseMip;
+                uint32_t mipCount;
+                uint32_t baseLayer;
+                uint32_t layerCount;
+                bool writeable;
+
+                bool operator==(const ViewKey& other) const
+                {
+                    return baseMip == other.baseMip && mipCount == other.mipCount &&
+                           baseLayer == other.baseLayer && layerCount == other.layerCount &&
+                           writeable == other.writeable;
+                }
+            };
+
+            struct RenderTargetKey
+            {
+                uint32_t mipLevel;
+                uint32_t arrayLayer;
+            };
+
+            agfx::TextureView& View(uint32_t baseMip, uint32_t mipCount, uint32_t baseLayer, uint32_t layerCount,
+                                    bool writeable)
+            {
+                if (mipCount == kAllMips) {
+                    mipCount = mInfo.mipLevels - baseMip;
+                }
+                if (layerCount == kAllLayers) {
+                    layerCount = TrackedLayers(mInfo) - baseLayer;
+                }
+
+                const ViewKey key{baseMip, mipCount, baseLayer, layerCount, writeable};
+                for (auto& entry : mViews) {
+                    if (entry.first == key) {
+                        return *entry.second;
+                    }
+                }
+
+                agfxTextureViewCreateInfo info{};
+                info.texture = mTexture;
+                info.format = mInfo.format;
+                info.type = mInfo.type;
+                info.baseMipLevel = baseMip;
+                info.mipLevelCount = mipCount;
+                info.baseArrayLayer = baseLayer;
+                info.arrayLayerCount = layerCount;
+                info.writeable = writeable ? 1 : 0;
+
+                mViews.emplace_back(key, std::make_unique<agfx::TextureView>(
+                                             mTexture.GetDevice(), agfxTextureViewCreate(mTexture.GetDevice(), &info)));
+                return *mViews.back().second;
+            }
+
+            agfx::Texture mTexture;
+            agfxTextureCreateInfo mInfo{};
+            ResourceStateTracker mTracker;
+            // Linear search: a texture accumulates a handful of views at most, and these are looked
+            // up far less often than the per-draw pipeline cache is. Held by pointer so that adding
+            // a view never reallocates a reference an earlier SRV()/UAV()/RTV() call handed out.
+            std::vector<std::pair<ViewKey, std::unique_ptr<agfx::TextureView>>> mViews;
+            std::vector<std::pair<RenderTargetKey, std::unique_ptr<agfx::RenderTarget>>> mRenderTargets;
+        };
+    } // namespace detail
+
+    /// @brief A 2D texture, optionally mipped, with lazily created and cached SRV/RTV/UAV views.
+    class Texture2D : public detail::TextureBase
+    {
+    public:
+        using TextureBase::TextureBase;
+    };
+
+    /// @brief An array of 2D textures. Layers are addressed by the layer parameter on views,
+    /// render targets, uploads and copies.
+    class Texture2DArray : public detail::TextureBase
+    {
+    public:
+        using TextureBase::TextureBase;
+
+        uint32_t ArrayLayers() const { return Info().depthOrArrayLayers; }
+    };
+
+    /// @brief A volume texture. Its depth slices are addressed by an agfxTextureRegion's z/depth,
+    /// *not* by the layer parameter -- a 3D texture has exactly one subresource layer per mip.
+    class Texture3D : public detail::TextureBase
+    {
+    public:
+        using TextureBase::TextureBase;
+
+        uint32_t Depth() const { return Info().depthOrArrayLayers; }
+    };
+
+    /// @brief A cube map: six square layers, ordered +X, -X, +Y, -Y, +Z, -Z.
+    class TextureCube : public detail::TextureBase
+    {
+    public:
+        using TextureBase::TextureBase;
+
+        uint32_t ArrayLayers() const { return Info().depthOrArrayLayers; }
     };
 
     /// @brief A buffer with lazily created and cached views (one per agfxBufferViewType).
@@ -508,7 +693,19 @@ namespace agfx::ez
 
         bool depthTestEnable = true;
         bool depthWriteEnable = true;
+        /// @brief Clamps fragments to the viewport's depth range instead of clipping them against
+        /// the near/far planes. The D3D11 rasterizer's DepthClipEnable, inverted.
+        bool depthClampEnable = false;
         agfxComparisonFunction depthCompareOp = AGFX_COMPARISON_FUNCTION_LESS;
+
+        /// @brief Allows this pipeline to be referenced from an indirect bundle
+        /// (Context::ExecuteIndirectBundle). Off by default because it constrains the PSO on the
+        /// Metal backend and most pipelines never replay indirectly.
+        /// @note Required for indirect replay on Metal, where a PSO without it cannot legally be
+        ///       encoded into an MTLIndirectCommandBuffer -- the failure is a GPU address fault
+        ///       rather than a validation message. D3D12 has no equivalent requirement, so leaving
+        ///       this off renders correctly on Windows and faults on macOS.
+        bool supportsIndirect = false;
 
         bool blendEnable = false;
         agfxBlendFactor srcBlend = AGFX_BLEND_FACTOR_SRC_ALPHA;
@@ -533,7 +730,9 @@ namespace agfx::ez
                 hash = FnvHashValue(hash, desc.topology);
                 hash = FnvHashValue(hash, desc.depthTestEnable);
                 hash = FnvHashValue(hash, desc.depthWriteEnable);
+                hash = FnvHashValue(hash, desc.depthClampEnable);
                 hash = FnvHashValue(hash, desc.depthCompareOp);
+                hash = FnvHashValue(hash, desc.supportsIndirect);
                 hash = FnvHashValue(hash, desc.blendEnable);
                 hash = FnvHashValue(hash, desc.srcBlend);
                 hash = FnvHashValue(hash, desc.dstBlend);
@@ -559,14 +758,14 @@ namespace agfx::ez
 
                 agfxRenderPipelineCreateInfo info{};
                 info.name = desc.name;
-                info.supportsIndirect = 0;
+                info.supportsIndirect = desc.supportsIndirect ? 1 : 0;
                 info.fillMode = desc.fillMode;
                 info.cullMode = desc.cullMode;
                 info.frontFace = desc.frontFace;
                 info.topology = desc.topology;
                 info.depthTestEnable = desc.depthTestEnable ? 1 : 0;
                 info.depthWriteEnable = desc.depthWriteEnable ? 1 : 0;
-                info.depthClampEnable = 0;
+                info.depthClampEnable = desc.depthClampEnable ? 1 : 0;
                 info.depthCompareOp = desc.depthCompareOp;
                 info.depthFormat = hasDepth ? depthFormat : AGFX_TEXTURE_FORMAT_UNKNOWN;
                 info.colorAttachmentCount = colorCount;
@@ -608,6 +807,27 @@ namespace agfx::ez
     }
 
     class Context;
+
+    /// @brief One attachment for Context::SetRenderTargets: a texture plus which mip and array
+    /// layer of it to render into.
+    ///
+    /// Implicitly constructible from a plain texture pointer, so the common whole-texture case
+    /// stays `SetRenderTargets({&color}, &depth)`. Naming a mip is what makes rendering down a mip
+    /// chain expressible; naming a layer is how you address one slice of a Texture2DArray or one
+    /// face of a TextureCube (faces are ordered +X, -X, +Y, -Y, +Z, -Z). A 3D texture's depth
+    /// slices are *not* layers and cannot be bound this way.
+    struct RenderTargetBinding
+    {
+        detail::TextureBase* texture = nullptr;
+        uint32_t mipLevel = 0;
+        uint32_t arrayLayer = 0;
+
+        RenderTargetBinding(detail::TextureBase* tex) : texture(tex) {}
+        RenderTargetBinding(detail::TextureBase& tex, uint32_t mip, uint32_t layer = 0)
+            : texture(&tex), mipLevel(mip), arrayLayer(layer)
+        {
+        }
+    };
 
     /// @brief RAII guard for one frame, returned by Context::BeginFrame(). Ends the frame automatically
     /// on destruction. Context::BeginFrame()/EndFrame() may also be called directly (this guard just
@@ -789,7 +1009,14 @@ namespace agfx::ez
 
         // --- Immediate-mode rendering (call between BeginFrame/EndFrame) ---
 
-        void SetRenderTargets(std::initializer_list<Texture2D*> colorTargets, Texture2D* depthTarget = nullptr,
+        /// @brief Opens a render pass over the given color attachments and optional depth attachment.
+        ///
+        /// Each binding may name a mip level and array layer (see RenderTargetBinding); the pass
+        /// dimensions are taken from the bound subresource, not the base mip, so rendering into mip
+        /// N gets an N-sized pass rather than a full-size one clipped down to it. Every attachment
+        /// is transitioned for you -- only the bound subresource, so the other mips/layers keep
+        /// whatever state they were in.
+        void SetRenderTargets(std::initializer_list<RenderTargetBinding> colorTargets, RenderTargetBinding depthTarget = nullptr,
                                agfxLoadOp loadOp = AGFX_LOAD_OPERATION_CLEAR, const float* clearColor = kDefaultClearColor,
                                agfxLoadOp depthLoadOp = AGFX_LOAD_OPERATION_CLEAR, float clearDepth = 1.0f)
         {
@@ -799,34 +1026,36 @@ namespace agfx::ez
             agfxRenderPassCreateInfo info{};
             uint32_t idx = 0;
             uint32_t w = 0, h = 0;
-            for (Texture2D* target : colorTargets) {
-                TransitionTexture(*target, AGFX_RESOURCE_STATE_RENDER_TARGET);
+            for (const RenderTargetBinding& binding : colorTargets) {
+                detail::TextureBase* target = binding.texture;
+                TransitionSubresourceForAttachment(*target, AGFX_RESOURCE_STATE_RENDER_TARGET, binding);
                 agfxRenderPassAttachment& att = info.colorAttachments[idx];
-                att.renderTarget = target->RTV();
+                att.renderTarget = target->RTV(binding.mipLevel, binding.arrayLayer);
                 att.loadOp = loadOp;
                 att.storeOp = AGFX_STORE_OPERATION_STORE;
                 if (clearColor) {
                     memcpy(att.clearColor, clearColor, sizeof(float) * 4);
                 }
                 mBoundColorFormats[idx] = target->Format();
-                w = target->Width();
-                h = target->Height();
+                w = MipExtent(target->Width(), binding.mipLevel);
+                h = MipExtent(target->Height(), binding.mipLevel);
                 ++idx;
             }
             info.colorAttachmentCount = idx;
             mBoundColorCount = idx;
 
-            if (depthTarget) {
-                TransitionTexture(*depthTarget, AGFX_RESOURCE_STATE_DEPTH_WRITE);
+            if (depthTarget.texture) {
+                detail::TextureBase* target = depthTarget.texture;
+                TransitionSubresourceForAttachment(*target, AGFX_RESOURCE_STATE_DEPTH_WRITE, depthTarget);
                 info.hasDepthAttachment = 1;
-                info.depthAttachment.renderTarget = depthTarget->RTV();
+                info.depthAttachment.renderTarget = target->RTV(depthTarget.mipLevel, depthTarget.arrayLayer);
                 info.depthAttachment.loadOp = depthLoadOp;
                 info.depthAttachment.storeOp = AGFX_STORE_OPERATION_STORE;
-                info.depthAttachment.clearColor[0] = clearDepth;
-                mBoundDepthFormat = depthTarget->Format();
+                info.depthAttachment.clearDepth = clearDepth;
+                mBoundDepthFormat = target->Format();
                 mHasDepth = true;
-                w = depthTarget->Width();
-                h = depthTarget->Height();
+                w = MipExtent(target->Width(), depthTarget.mipLevel);
+                h = MipExtent(target->Height(), depthTarget.mipLevel);
             } else {
                 mHasDepth = false;
             }
@@ -882,11 +1111,28 @@ namespace agfx::ez
 
         uint32_t CurrentFrameSlot() const { return mFrameSlot; }
 
-        void SetViewportScissor(float x, float y, float w, float h)
+        /// @brief Sets the viewport (the transform applied to clip space) alone, leaving the scissor
+        /// as-is. Use this with SetScissor when the two need to disagree -- squeezing the image into
+        /// a sub-rect is a viewport job, cropping it is a scissor job, and they are not the same.
+        void SetViewport(float x, float y, float w, float h)
         {
             assert(mActiveRenderPass);
             mActiveRenderPass->SetViewport(x, y, w, h);
-            mActiveRenderPass->SetScissor(static_cast<uint32_t>(x), static_cast<uint32_t>(y), static_cast<uint32_t>(w), static_cast<uint32_t>(h));
+        }
+
+        /// @brief Sets the scissor rect (the crop applied to rasterized pixels) alone.
+        void SetScissor(uint32_t x, uint32_t y, uint32_t w, uint32_t h)
+        {
+            assert(mActiveRenderPass);
+            mActiveRenderPass->SetScissor(x, y, w, h);
+        }
+
+        /// @brief Sets viewport and scissor to the same rect -- the common case. When they need to
+        /// differ, call SetViewport and SetScissor separately.
+        void SetViewportScissor(float x, float y, float w, float h)
+        {
+            SetViewport(x, y, w, h);
+            SetScissor(static_cast<uint32_t>(x), static_cast<uint32_t>(y), static_cast<uint32_t>(w), static_cast<uint32_t>(h));
         }
 
         void SetPipeline(const PipelineDesc& desc)
@@ -894,6 +1140,33 @@ namespace agfx::ez
             assert(mActiveRenderPass && "Context::SetPipeline() requires SetRenderTargets()/SetBackBufferRenderTarget() to be called first");
             agfx::RenderPipeline& pipeline = mPipelineCache.GetOrCreate(*mDevice, desc, mBoundColorFormats.data(), mBoundColorCount, mBoundDepthFormat, mHasDepth);
             mActiveRenderPass->SetPipeline(pipeline);
+        }
+
+        /// @brief Resolves a PipelineDesc to the cached agfxRenderPipeline it would produce against
+        /// the given attachment formats, without needing an active render pass.
+        ///
+        /// SetPipeline is enough for ordinary drawing, but indirect replay needs the raw pipeline
+        /// pointer for agfxIndirectBundleExecuteInfo::renderPipeline -- and needs it at *prepare*
+        /// time, inside a compute pass, before any render pass has been begun. Resolving from the
+        /// same cache and the same desc guarantees prepare and execute name the identical PSO.
+        ///
+        /// `colorTargets` and `depthTarget` must be the same attachments the subsequent
+        /// SetRenderTargets call receives: the PSO is keyed on their formats, so passing different
+        /// ones silently returns a different pipeline.
+        agfx::RenderPipeline& GetOrCreatePipeline(const PipelineDesc& desc,
+                                                  std::initializer_list<RenderTargetBinding> colorTargets,
+                                                  RenderTargetBinding depthTarget = nullptr)
+        {
+            std::array<agfxTextureFormat, 8> formats{}; // Matches mBoundColorFormats.
+            uint32_t count = 0;
+            for (const RenderTargetBinding& binding : colorTargets) {
+                formats[count++] = binding.texture->Format();
+            }
+            const bool hasDepth = depthTarget.texture != nullptr;
+            return mPipelineCache.GetOrCreate(*mDevice, desc, formats.data(), count,
+                                              hasDepth ? depthTarget.texture->Format()
+                                                       : AGFX_TEXTURE_FORMAT_UNKNOWN,
+                                              hasDepth);
         }
 
         void PushShaderBindings(const ShaderBindings& bindings)
@@ -934,19 +1207,13 @@ namespace agfx::ez
 
         // --- One-call resource creation (immediate, synchronous upload) ---
 
+        /// @brief Creates a 2D texture, optionally with a mip chain and optionally seeding mip 0.
+        /// mipLevels > 1 allocates the chain but only mip 0 is populated from pixels; fill the rest
+        /// with UploadTexture, a copy, or a downsample pass.
         Texture2D CreateTexture2D(uint32_t width, uint32_t height, agfxTextureFormat format, agfxTextureUsage usage,
-                                   const void* pixels = nullptr, uint32_t bytesPerRow = 0)
+                                   const void* pixels = nullptr, uint32_t bytesPerRow = 0, uint32_t mipLevels = 1)
         {
-            agfxTextureCreateInfo info{};
-            info.type = AGFX_TEXTURE_TYPE_2D;
-            info.format = format;
-            info.usage = static_cast<agfxTextureUsage>(usage | AGFX_TEXTURE_USAGE_SAMPLED);
-            info.width = width;
-            info.height = height;
-            info.depthOrArrayLayers = 1;
-            info.mipLevels = 1;
-
-            Texture2D texture(mDevice->CreateTexture(info), info);
+            Texture2D texture = CreateTextureTyped<Texture2D>(AGFX_TEXTURE_TYPE_2D, width, height, 1, format, usage, mipLevels);
 
             if (pixels) {
                 uint32_t rowBytes = bytesPerRow ? bytesPerRow : width * BytesPerPixel(format);
@@ -965,14 +1232,100 @@ namespace agfx::ez
             return texture;
         }
 
+        /// @brief Creates an array of arrayLayers 2D textures. Seed layers with UploadTexture.
+        Texture2DArray CreateTexture2DArray(uint32_t width, uint32_t height, uint32_t arrayLayers,
+                                             agfxTextureFormat format, agfxTextureUsage usage, uint32_t mipLevels = 1)
+        {
+            Texture2DArray texture = CreateTextureTyped<Texture2DArray>(AGFX_TEXTURE_TYPE_2D_ARRAY, width, height,
+                                                                        arrayLayers, format, usage, mipLevels);
+            mDevice->MakeResourcesResident();
+            return texture;
+        }
+
+        /// @brief Creates a volume texture. Seed slices with UploadTexture, addressing them through
+        /// the region's z/depth -- a 3D texture has no array layers.
+        Texture3D CreateTexture3D(uint32_t width, uint32_t height, uint32_t depth, agfxTextureFormat format,
+                                   agfxTextureUsage usage, uint32_t mipLevels = 1)
+        {
+            Texture3D texture = CreateTextureTyped<Texture3D>(AGFX_TEXTURE_TYPE_3D, width, height, depth, format,
+                                                              usage, mipLevels);
+            mDevice->MakeResourcesResident();
+            return texture;
+        }
+
+        /// @brief Creates a cube map of six size x size faces, ordered +X, -X, +Y, -Y, +Z, -Z.
+        TextureCube CreateTextureCube(uint32_t size, agfxTextureFormat format, agfxTextureUsage usage,
+                                       uint32_t mipLevels = 1)
+        {
+            TextureCube texture = CreateTextureTyped<TextureCube>(AGFX_TEXTURE_TYPE_CUBE, size, size, 6, format,
+                                                                  usage, mipLevels);
+            mDevice->MakeResourcesResident();
+            return texture;
+        }
+
+        /// @brief Synchronously uploads CPU data into one (mip, layer) subresource, blocking until the
+        /// copy completes. This is the general form of the pixels argument to CreateTexture2D: use it
+        /// to seed mips below 0, array layers, and 3D slices (which are addressed by region.z/depth
+        /// rather than by layer). bytesPerImage defaults to bytesPerRow * region.height.
+        ///
+        /// The destination is left in AGFX_RESOURCE_STATE_COMMON, matching CreateTexture2D -- see the
+        /// note on detail::Uploader for why that is both correct and deliberate.
+        void UploadTexture(detail::TextureBase& dst, const agfxTextureRegion& region, uint32_t mipLevel,
+                           uint32_t layer, const void* data, uint32_t dataSize, uint32_t bytesPerRow,
+                           uint32_t bytesPerImage = 0)
+        {
+            mUploader->UploadTexture(dst.Raw(), region, mipLevel, layer, data, dataSize, bytesPerRow,
+                                     bytesPerImage ? bytesPerImage : bytesPerRow * region.height);
+            mUploader->Flush();
+            mDevice->MakeResourcesResident();
+        }
+
+        // --- Copies (recorded into the current frame, between BeginFrame/EndFrame) ---
+        //
+        // Each opens and closes its own scoped compute pass on this frame's command buffer. Callers
+        // are responsible for the COPY_SOURCE/COPY_DEST transitions via TransitionTexture /
+        // TransitionBuffer -- these do not transition on your behalf, matching the rest of ez's
+        // best-effort, explicit barrier model.
+
+        void CopyTextureToTexture(detail::TextureBase& src, detail::TextureBase& dst, const agfxTextureRegion& region,
+                                  uint32_t mipLevel = 0, uint32_t layer = 0)
+        {
+            assert(mFrameActive);
+            agfx::ComputePass pass = mCommandBuffers[mFrameSlot].BeginComputePass("ez copy texture to texture");
+            pass.CopyTextureToTexture(src.Raw(), dst.Raw(), region, mipLevel, layer);
+        }
+
+        void CopyBufferToTexture(Buffer& src, detail::TextureBase& dst, const agfxTextureRegion& region,
+                                 uint32_t mipLevel, uint32_t layer, uint32_t bytesPerRow, uint32_t bytesPerImage = 0)
+        {
+            assert(mFrameActive);
+            agfx::ComputePass pass = mCommandBuffers[mFrameSlot].BeginComputePass("ez copy buffer to texture");
+            pass.CopyBufferToTexture(src.Raw(), dst.Raw(), region, mipLevel, layer, bytesPerRow,
+                                     bytesPerImage ? bytesPerImage : bytesPerRow * region.height);
+        }
+
+        void CopyTextureToBuffer(detail::TextureBase& src, Buffer& dst, uint64_t bufferOffset,
+                                 const agfxTextureRegion& region, uint32_t mipLevel, uint32_t layer,
+                                 uint32_t bytesPerRow, uint32_t bytesPerImage = 0)
+        {
+            assert(mFrameActive);
+            agfx::ComputePass pass = mCommandBuffers[mFrameSlot].BeginComputePass("ez copy texture to buffer");
+            pass.CopyTextureToBuffer(src.Raw(), dst.Raw(), bufferOffset, region, mipLevel, layer, bytesPerRow,
+                                     bytesPerImage ? bytesPerImage : bytesPerRow * region.height);
+        }
+
         Buffer CreateVertexBuffer(const void* data, uint64_t size, uint64_t stride)
         {
             return CreateInitializedBuffer(data, size, stride, AGFX_BUFFER_USAGE_SHADER_READ);
         }
 
-        Buffer CreateIndexBuffer(const void* data, uint64_t size)
+        /// @brief Creates an index buffer. stride selects the index width: 4 for u32 (the default),
+        /// 2 for u16. The backends derive the index type from the buffer's stride, so this must match
+        /// the data actually uploaded -- a u16 buffer left at stride 4 is read as u32 and draws garbage.
+        Buffer CreateIndexBuffer(const void* data, uint64_t size, uint64_t stride = 4)
         {
-            return CreateInitializedBuffer(data, size, 0, AGFX_BUFFER_USAGE_INDEX);
+            assert((stride == 2 || stride == 4) && "CreateIndexBuffer: index stride must be 2 (u16) or 4 (u32)");
+            return CreateInitializedBuffer(data, size, stride, AGFX_BUFFER_USAGE_INDEX);
         }
 
         Buffer CreateStructuredBuffer(const void* data, uint64_t size, uint64_t stride, bool shaderWritable = false)
@@ -1062,13 +1415,37 @@ namespace agfx::ez
 
         // --- Explicit barrier escape hatch ---
 
-        void TransitionTexture(Texture2D& tex, agfxResourceState newState)
+        /// @brief Transitions a texture, or one (mip, layer) subresource of it, into newState.
+        ///
+        /// Defaults to the whole resource, which is a single barrier. Passing an explicit mip and/or
+        /// layer is what makes mip-chain generation expressible: mip N can sit in RENDER_TARGET or
+        /// UNORDERED_ACCESS while mip N-1 is read as a shader resource. Transitioning the whole
+        /// resource after that is still correct -- the subresources are re-grouped by their current
+        /// state and one barrier is emitted per distinct old state, since a single barrier can only
+        /// name one.
+        void TransitionTexture(detail::TextureBase& tex, agfxResourceState newState,
+                               uint32_t mipLevel = kAllMips, uint32_t arrayLayer = kAllLayers)
         {
-            if (tex.State() == newState) {
+            ResourceStateTracker& tracker = tex.Tracker();
+            agfx::CommandBuffer& cmd = mCommandBuffers[mFrameSlot];
+
+            if (mipLevel != kAllMips || arrayLayer != kAllLayers) {
+                TransitionSubresources(cmd, tex, newState, mipLevel, arrayLayer);
                 return;
             }
-            mCommandBuffers[mFrameSlot].TextureBarrier(tex.Raw(), tex.State(), newState, AGFX_SUBRESOURCE_ALL_MIPS, AGFX_SUBRESOURCE_ALL_LAYERS, true);
-            tex.SetState(newState);
+
+            if (tracker.Uniform()) {
+                if (tracker.Current() == newState) {
+                    return;
+                }
+                cmd.TextureBarrier(tex.Raw(), tracker.Current(), newState, AGFX_SUBRESOURCE_ALL_MIPS,
+                                   AGFX_SUBRESOURCE_ALL_LAYERS, true);
+                tracker.Set(newState);
+                return;
+            }
+
+            TransitionSubresources(cmd, tex, newState, kAllMips, kAllLayers);
+            tracker.Set(newState);
         }
 
         void TransitionBuffer(Buffer& buf, agfxResourceState newState)
@@ -1121,6 +1498,71 @@ namespace agfx::ez
         }
 
     private:
+        /// @brief A mip level's extent, floored at 1 the way every backend sizes its mip chain.
+        static uint32_t MipExtent(uint32_t base, uint32_t mipLevel)
+        {
+            const uint32_t extent = base >> mipLevel;
+            return extent ? extent : 1u;
+        }
+
+        /// @brief Transitions exactly what SetRenderTargets is about to bind. A whole-texture
+        /// binding (the default mip 0 / layer 0 on a single-mip, single-layer texture) transitions
+        /// as one barrier; anything naming a mip or layer on a larger texture transitions only that
+        /// subresource, so binding one face or one mip does not disturb the others.
+        void TransitionSubresourceForAttachment(detail::TextureBase& tex, agfxResourceState state,
+                                                const RenderTargetBinding& binding)
+        {
+            const bool wholeTexture = binding.mipLevel == 0 && binding.arrayLayer == 0 &&
+                                      tex.Tracker().MipLevels() == 1 && tex.Tracker().ArrayLayers() == 1;
+            if (wholeTexture) {
+                TransitionTexture(tex, state);
+            } else {
+                TransitionTexture(tex, state, binding.mipLevel, binding.arrayLayer);
+            }
+        }
+
+        /// @brief Emits the barriers for TransitionTexture's subresource paths and updates the tracker.
+        /// Walks the addressed (mip, layer) subresources, skipping any already in newState, and emits
+        /// one barrier per subresource -- each may be coming from a different old state, and a barrier
+        /// names exactly one.
+        void TransitionSubresources(agfx::CommandBuffer& cmd, detail::TextureBase& tex,
+                                    agfxResourceState newState, uint32_t mipLevel, uint32_t arrayLayer)
+        {
+            ResourceStateTracker& tracker = tex.Tracker();
+            const uint32_t mipBegin = (mipLevel == kAllMips) ? 0u : mipLevel;
+            const uint32_t mipEnd = (mipLevel == kAllMips) ? tracker.MipLevels() : mipLevel + 1u;
+            const uint32_t layerBegin = (arrayLayer == kAllLayers) ? 0u : arrayLayer;
+            const uint32_t layerEnd = (arrayLayer == kAllLayers) ? tracker.ArrayLayers() : arrayLayer + 1u;
+
+            for (uint32_t mip = mipBegin; mip < mipEnd; ++mip) {
+                for (uint32_t layer = layerBegin; layer < layerEnd; ++layer) {
+                    const agfxResourceState oldState = tracker.At(mip, layer);
+                    if (oldState == newState) {
+                        continue;
+                    }
+                    cmd.TextureBarrier(tex.Raw(), oldState, newState, mip, layer, true);
+                    tracker.SetAt(mip, layer, newState);
+                }
+            }
+        }
+
+        /// @brief Fills in an agfxTextureCreateInfo and wraps the result in the matching ez type.
+        /// SAMPLED is force-ORed into every texture's usage, as CreateTexture2D has always done.
+        template<typename T>
+        T CreateTextureTyped(agfxTextureType type, uint32_t width, uint32_t height, uint32_t depthOrArrayLayers,
+                             agfxTextureFormat format, agfxTextureUsage usage, uint32_t mipLevels)
+        {
+            agfxTextureCreateInfo info{};
+            info.type = type;
+            info.format = format;
+            info.usage = static_cast<agfxTextureUsage>(usage | AGFX_TEXTURE_USAGE_SAMPLED);
+            info.width = width;
+            info.height = height;
+            info.depthOrArrayLayers = depthOrArrayLayers;
+            info.mipLevels = mipLevels ? mipLevels : 1;
+            return T(mDevice->CreateTexture(info), info);
+        }
+
         static uint32_t BytesPerPixel(agfxTextureFormat format)
         {
             switch (format) {

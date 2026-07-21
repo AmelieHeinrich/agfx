@@ -19,10 +19,10 @@
 // Seeding with the write shader rather than a host upload matches the load tests' reasoning: that
 // path is pinned independently by test_compute_texture_write_2d_array.cpp, so a failure here is
 // attributable to the sample.
-//
-// There is no Ez variant: ez::Context only exposes CreateTexture2D.
 
 #include "../test_gpu.h"
+
+#include <agfx/agfx_ez.hpp>
 
 namespace
 {
@@ -215,10 +215,15 @@ AGFX_TEST_TEXTURE(Sample2DArray, C, kWidth, kHeight* kLayers)
     sampleConstants.destination = (uint32_t)agfxTextureViewGetHandle(destUav);
 
     gpu.RecordAndSubmit([&](agfxCommandBuffer* cmd) {
+        // Every layer must be transitioned, not just layer 0, and agglomerate must be true: on the
+        // Metal backend a barrier recorded with agglomerate=false is a no-op, so passing false here
+        // left the seed and sample dispatches with no synchronization at all between them.
         agfxCommandBufferTextureBarrier(cmd, source, AGFX_RESOURCE_STATE_COMMON,
-                                        AGFX_RESOURCE_STATE_UNORDERED_ACCESS, 0, 0, 0);
+                                        AGFX_RESOURCE_STATE_UNORDERED_ACCESS,
+                                        AGFX_SUBRESOURCE_ALL_MIPS, AGFX_SUBRESOURCE_ALL_LAYERS, 1);
         agfxCommandBufferTextureBarrier(cmd, dest, AGFX_RESOURCE_STATE_COMMON,
-                                        AGFX_RESOURCE_STATE_UNORDERED_ACCESS, 0, 0, 0);
+                                        AGFX_RESOURCE_STATE_UNORDERED_ACCESS,
+                                        AGFX_SUBRESOURCE_ALL_MIPS, AGFX_SUBRESOURCE_ALL_LAYERS, 1);
         agfxComputePass* pass = agfxComputePassBegin(cmd, "array seed");
         agfxComputePassSetPipeline(pass, writePipeline);
         agfxComputePassPushConstants(pass, &seedConstants, sizeof(seedConstants));
@@ -228,7 +233,8 @@ AGFX_TEST_TEXTURE(Sample2DArray, C, kWidth, kHeight* kLayers)
 
     gpu.RecordAndSubmit([&](agfxCommandBuffer* cmd) {
         agfxCommandBufferTextureBarrier(cmd, source, AGFX_RESOURCE_STATE_UNORDERED_ACCESS,
-                                        AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, 0, 0, 0);
+                                        AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                        AGFX_SUBRESOURCE_ALL_MIPS, AGFX_SUBRESOURCE_ALL_LAYERS, 1);
         agfxComputePass* pass = agfxComputePassBegin(cmd, "array sample");
         agfxComputePassSetPipeline(pass, samplePipeline);
         agfxComputePassPushConstants(pass, &sampleConstants, sizeof(sampleConstants));
@@ -311,10 +317,12 @@ AGFX_TEST_TEXTURE(Sample2DArray, Cpp, kWidth, kHeight* kLayers)
     sampleConstants.destination = (uint32_t)destUav.GetHandle();
 
     cmd.Begin();
+    // agglomerate must be true: a barrier recorded with false is a no-op on the Metal backend, which
+    // left the seed and sample dispatches unsynchronized and made this test intermittently fail.
     cmd.TextureBarrier(source, AGFX_RESOURCE_STATE_COMMON, AGFX_RESOURCE_STATE_UNORDERED_ACCESS,
-                       AGFX_SUBRESOURCE_ALL_MIPS, AGFX_SUBRESOURCE_ALL_LAYERS, false);
+                       AGFX_SUBRESOURCE_ALL_MIPS, AGFX_SUBRESOURCE_ALL_LAYERS, true);
     cmd.TextureBarrier(dest, AGFX_RESOURCE_STATE_COMMON, AGFX_RESOURCE_STATE_UNORDERED_ACCESS,
-                       AGFX_SUBRESOURCE_ALL_MIPS, AGFX_SUBRESOURCE_ALL_LAYERS, false);
+                       AGFX_SUBRESOURCE_ALL_MIPS, AGFX_SUBRESOURCE_ALL_LAYERS, true);
     {
         agfx::ComputePass pass = cmd.BeginComputePass("array seed");
         pass.SetPipeline(writePipeline);
@@ -323,7 +331,7 @@ AGFX_TEST_TEXTURE(Sample2DArray, Cpp, kWidth, kHeight* kLayers)
     }
     cmd.TextureBarrier(source, AGFX_RESOURCE_STATE_UNORDERED_ACCESS,
                        AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, AGFX_SUBRESOURCE_ALL_MIPS,
-                       AGFX_SUBRESOURCE_ALL_LAYERS, false);
+                       AGFX_SUBRESOURCE_ALL_LAYERS, true);
     {
         agfx::ComputePass pass = cmd.BeginComputePass("array sample");
         pass.SetPipeline(samplePipeline);
@@ -339,6 +347,102 @@ AGFX_TEST_TEXTURE(Sample2DArray, Cpp, kWidth, kHeight* kLayers)
     Image image;
     const bool readOk = ReadbackTexture2D(device.Get(), queue, dest, kWidth, kHeight * kLayers, kFormat,
                                           AGFX_RESOURCE_STATE_UNORDERED_ACCESS, image);
+    AGFX_EXPECT_MSG(readOk, "texture readback failed");
+
+    ExpectImageMatchesGolden(ctx, kGolden, image);
+}
+
+AGFX_TEST_TEXTURE(Sample2DArray, Ez, kWidth, kHeight* kLayers)
+{
+    agfx::ez::ContextCreateInfo contextInfo{};
+    contextInfo.deviceInfo = DefaultDeviceCreateInfo();
+    contextInfo.windowHandle = nullptr; // headless: no swap chain
+    contextInfo.width = kWidth;
+    contextInfo.height = kHeight * kLayers;
+    agfx::ez::Context context(contextInfo);
+
+    const CompiledShader writeShader =
+        CompileTestShader("texture_volume.hlsl", AGFX_SHADER_STAGE_COMPUTE, "main_write_array_cs");
+    const CompiledShader sampleShader =
+        CompileTestShader("sampling.hlsl", AGFX_SHADER_STAGE_COMPUTE, "main_sample_2d_array_cs");
+    AGFX_EXPECT_MSG(writeShader.Valid(), "failed to compile texture_volume.hlsl:main_write_array_cs");
+    AGFX_EXPECT_MSG(sampleShader.Valid(), "failed to compile sampling.hlsl:main_sample_2d_array_cs");
+
+    agfx::Device& device = context.GetDevice();
+
+    const agfxTextureUsage usage =
+        (agfxTextureUsage)(AGFX_TEXTURE_USAGE_STORAGE | AGFX_TEXTURE_USAGE_SAMPLED);
+    agfx::ez::Texture2DArray source = context.CreateTexture2DArray(kWidth, kHeight, kLayers, kFormat, usage);
+    // The stacked destination is a plain 2D texture, so its default UAV is already FlatViewInfo().
+    agfx::ez::Texture2D dest = context.CreateTexture2D(kWidth, kHeight * kLayers, kFormat, usage);
+
+    // ez has no sampler sugar; samplers come straight off the device.
+    agfx::Sampler sampler = device.CreateSampler(SamplerInfo());
+    AGFX_EXPECT_NOT_NULL(sampler.Get());
+
+    agfx::ComputePipeline writePipeline;
+    agfx::ComputePipeline samplePipeline;
+    {
+        agfx::ShaderModule writeModule(device.Get(),
+            CreateShaderModule(device.Get(), writeShader, "main_write_array_cs", AGFX_SHADER_MODULE_TYPE_COMPUTE));
+        agfx::ShaderModule sampleModule(device.Get(),
+            CreateShaderModule(device.Get(), sampleShader, "main_sample_2d_array_cs", AGFX_SHADER_MODULE_TYPE_COMPUTE));
+        writePipeline = device.CreateComputePipeline(ComputePipelineInfo("array seed", writeModule));
+        samplePipeline = device.CreateComputePipeline(ComputePipelineInfo("array sample", sampleModule));
+    }
+    AGFX_EXPECT_NOT_NULL(writePipeline.Get());
+    AGFX_EXPECT_NOT_NULL(samplePipeline.Get());
+
+    agfx::ez::ShaderBindings seedBindings;
+    seedBindings.Write(0u); // unused source slot
+    seedBindings.BindTexture(source.UAV());
+    seedBindings.Write(kWidth);
+    seedBindings.Write(kHeight);
+    seedBindings.Write(kLayers);
+
+    // Mirrors SamplingPushConstants field for field.
+    agfx::ez::ShaderBindings sampleBindings;
+    sampleBindings.BindTexture(source.SRV());
+    sampleBindings.BindSampler(sampler);
+    sampleBindings.BindTexture(dest.UAV());
+    sampleBindings.Write(kWidth);
+    sampleBindings.Write(kHeight);
+    sampleBindings.Write(kLayers);
+    sampleBindings.Write(kUvScale);
+    sampleBindings.Write(kUvScale);
+    sampleBindings.Write(kUvOffset);
+    sampleBindings.Write(kUvOffset);
+
+    device.MakeResourcesResident();
+
+    {
+        agfx::ez::Frame frame = context.BeginFrame();
+        context.TransitionTexture(source, AGFX_RESOURCE_STATE_UNORDERED_ACCESS);
+        context.TransitionTexture(dest, AGFX_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        // ez deliberately has no compute-pass sugar; drop to the frame's raw command buffer.
+        {
+            agfx::ComputePass pass = context.GetCurrentCommandBuffer().BeginComputePass("array seed");
+            pass.SetPipeline(writePipeline);
+            pass.PushConstants(seedBindings.Data(), seedBindings.Size());
+            pass.Dispatch(kGroupsX, kGroupsY, kGroupsZ);
+        }
+
+        // The seed writes the source through its UAV; the sample reads it through its SRV.
+        context.TransitionTexture(source, AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        {
+            agfx::ComputePass pass = context.GetCurrentCommandBuffer().BeginComputePass("array sample");
+            pass.SetPipeline(samplePipeline);
+            pass.PushConstants(sampleBindings.Data(), sampleBindings.Size());
+            pass.Dispatch(kGroupsX, kGroupsY, kGroupsZ);
+        }
+    }
+    context.DrainGPU();
+
+    Image image;
+    const bool readOk = ReadbackTexture2D(device.Get(), context.GetGraphicsQueue(), dest.Raw(), kWidth,
+                                          kHeight * kLayers, kFormat, dest.State(), image);
     AGFX_EXPECT_MSG(readOk, "texture readback failed");
 
     ExpectImageMatchesGolden(ctx, kGolden, image);

@@ -13,6 +13,8 @@
 
 #include "../test_gpu.h"
 
+#include <agfx/agfx_ez.hpp>
+
 namespace
 {
     using namespace agfxtest;
@@ -167,6 +169,47 @@ AGFX_TEST_BUFFER(CopyTextureToBufferSlice, Cpp)
     std::vector<uint8_t> bytes;
     const bool readOk = ReadbackBuffer(device.Get(), queue, dest, kLayerBytes,
                                        AGFX_RESOURCE_STATE_COPY_DEST, bytes);
+    AGFX_EXPECT_MSG(readOk, "buffer readback failed");
+    AGFX_EXPECT_MSG(bytes == LayerPixels(kCopyLayer), "copied bytes are not layer 2's pattern");
+
+    ExpectBufferMatchesGolden(ctx, kGolden, bytes);
+}
+
+AGFX_TEST_BUFFER(CopyTextureToBufferSlice, Ez)
+{
+    agfx::ez::ContextCreateInfo contextInfo{};
+    contextInfo.deviceInfo = DefaultDeviceCreateInfo();
+    contextInfo.windowHandle = nullptr; // headless: no swap chain
+    contextInfo.width = kWidth;
+    contextInfo.height = kHeight;
+    agfx::ez::Context context(contextInfo);
+
+    agfx::Device& device = context.GetDevice();
+
+    agfx::ez::Texture2DArray source = context.CreateTexture2DArray(kWidth, kHeight, kLayerCount, kFormat,
+                                                                    AGFX_TEXTURE_USAGE_SAMPLED);
+    agfx::ez::Buffer dest = context.CreateStructuredBuffer(nullptr, kLayerBytes, kBytesPerPixel,
+                                                           /*shaderWritable*/ true);
+
+    for (uint32_t layer = 0; layer < kLayerCount; ++layer) {
+        const std::vector<uint8_t> pixels = LayerPixels(layer);
+        context.UploadTexture(source, LayerRegion(), 0, layer, pixels.data(), (uint32_t)pixels.size(), kRowBytes);
+    }
+
+    device.MakeResourcesResident();
+
+    {
+        agfx::ez::Frame frame = context.BeginFrame();
+        context.TransitionTexture(source, AGFX_RESOURCE_STATE_COPY_SOURCE, 0, kCopyLayer);
+        context.TransitionBuffer(dest, AGFX_RESOURCE_STATE_COPY_DEST);
+        context.CopyTextureToBuffer(source, dest, 0, LayerRegion(), 0, kCopyLayer, kRowBytes,
+                                    (uint32_t)kLayerBytes);
+    }
+    context.DrainGPU();
+
+    std::vector<uint8_t> bytes;
+    const bool readOk = ReadbackBuffer(device.Get(), context.GetGraphicsQueue(), dest.Raw(), kLayerBytes,
+                                       dest.State(), bytes);
     AGFX_EXPECT_MSG(readOk, "buffer readback failed");
     AGFX_EXPECT_MSG(bytes == LayerPixels(kCopyLayer), "copied bytes are not layer 2's pattern");
 

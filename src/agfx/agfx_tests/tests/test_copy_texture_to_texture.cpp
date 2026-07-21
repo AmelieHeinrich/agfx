@@ -213,9 +213,7 @@ AGFX_TEST_TEXTURE(CopyTextureToTexture, Ez, kWidth, kHeight)
         context.TransitionTexture(source, AGFX_RESOURCE_STATE_COPY_SOURCE);
         context.TransitionTexture(dest, AGFX_RESOURCE_STATE_COPY_DEST);
 
-        // ez has no texture-to-texture sugar; drop to the frame's raw command buffer.
-        agfx::ComputePass pass = context.GetCurrentCommandBuffer().BeginComputePass("copy texture to texture");
-        pass.CopyTextureToTexture(source.Raw(), dest.Raw(), CopyRegion(), 0, 0);
+        context.CopyTextureToTexture(source, dest, CopyRegion(), 0, 0);
     }
     context.DrainGPU();
 

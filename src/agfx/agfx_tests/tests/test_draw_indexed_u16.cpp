@@ -12,10 +12,10 @@
 // derives the index type from anything other than the buffer stride, or reads u16 indices as u32,
 // the two tests disagree against the same expectation.
 //
-// There is no Ez variant: ez's CreateIndexBuffer hardcodes a stride of 0, which the backends read
-// as 32-bit, so a u16 index buffer isn't expressible through that layer.
 
 #include "../test_gpu.h"
+
+#include <agfx/agfx_ez.hpp>
 
 namespace
 {
@@ -289,6 +289,71 @@ AGFX_TEST_TEXTURE(DrawIndexedU16, Cpp, kWidth, kHeight)
     Image image;
     const bool readOk = ReadbackTexture2D(device.Get(), queue, target, kWidth, kHeight, kFormat,
                                           AGFX_RESOURCE_STATE_RENDER_TARGET, image);
+    AGFX_EXPECT_MSG(readOk, "texture readback failed");
+
+    ExpectImageMatchesGolden(ctx, kGolden, image);
+}
+
+AGFX_TEST_TEXTURE(DrawIndexedU16, Ez, kWidth, kHeight)
+{
+    agfx::ez::ContextCreateInfo contextInfo{};
+    contextInfo.deviceInfo = DefaultDeviceCreateInfo();
+    contextInfo.windowHandle = nullptr; // headless: no swap chain
+    contextInfo.width = kWidth;
+    contextInfo.height = kHeight;
+    agfx::ez::Context context(contextInfo);
+
+    const CompiledShader vsShader = CompileTestShader("indexed.hlsl", AGFX_SHADER_STAGE_VERTEX, "main_vs");
+    const CompiledShader psShader = CompileTestShader("indexed.hlsl", AGFX_SHADER_STAGE_FRAGMENT, "main_ps");
+    AGFX_EXPECT_MSG(vsShader.Valid(), "failed to compile indexed.hlsl:main_vs");
+    AGFX_EXPECT_MSG(psShader.Valid(), "failed to compile indexed.hlsl:main_ps");
+
+    agfx::Device& device = context.GetDevice();
+
+    agfx::ShaderModule vsModule(device.Get(),
+        CreateShaderModule(device.Get(), vsShader, "main_vs", AGFX_SHADER_MODULE_TYPE_VERTEX));
+    agfx::ShaderModule psModule(device.Get(),
+        CreateShaderModule(device.Get(), psShader, "main_ps", AGFX_SHADER_MODULE_TYPE_FRAGMENT));
+    AGFX_EXPECT_NOT_NULL(vsModule.Get());
+    AGFX_EXPECT_NOT_NULL(psModule.Get());
+
+    agfx::ez::Texture2D target = context.CreateTexture2D(kWidth, kHeight, kFormat,
+                                                         AGFX_TEXTURE_USAGE_COLOR_ATTACHMENT);
+
+    agfx::ez::Buffer vertexBuffer = context.CreateStructuredBuffer(kVertices, sizeof(kVertices), sizeof(Vertex));
+    // The whole point of this test: a 2-byte stride is what selects 16-bit indices, and ez can now
+    // say so. Left at the default 4 the backends read these u16 indices as u32 and draw garbage.
+    agfx::ez::Buffer indexBuffer = context.CreateIndexBuffer(kIndices, sizeof(kIndices), sizeof(uint16_t));
+
+    agfx::ez::ShaderBindings bindings;
+    bindings.BindBuffer(vertexBuffer.View(AGFX_BUFFER_VIEW_TYPE_STRUCTURED));
+
+    agfx::ez::PipelineDesc desc;
+    desc.name = "test draw indexed u16";
+    desc.vertexShader = &vsModule;
+    desc.fragmentShader = &psModule;
+    desc.cullMode = AGFX_CULL_MODE_NONE;
+    desc.depthTestEnable = false;
+    desc.depthWriteEnable = false;
+
+    device.MakeResourcesResident();
+
+    {
+        agfx::ez::Frame frame = context.BeginFrame();
+        context.TransitionBuffer(vertexBuffer, AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        context.TransitionBuffer(indexBuffer, AGFX_RESOURCE_STATE_INDEX_BUFFER);
+        context.SetRenderTargets({&target}, nullptr, AGFX_LOAD_OPERATION_CLEAR, kClearColor);
+        context.SetViewportScissor(0, 0, kWidth, kHeight);
+        context.SetPipeline(desc);
+        context.PushShaderBindings(bindings);
+        context.DrawIndexed(indexBuffer, kIndexCount);
+        context.EndActivePass();
+    }
+    context.DrainGPU();
+
+    Image image;
+    const bool readOk = ReadbackTexture2D(device.Get(), context.GetGraphicsQueue(), target.Raw(),
+                                          kWidth, kHeight, kFormat, target.State(), image);
     AGFX_EXPECT_MSG(readOk, "texture readback failed");
 
     ExpectImageMatchesGolden(ctx, kGolden, image);

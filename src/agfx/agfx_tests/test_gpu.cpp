@@ -113,6 +113,12 @@ namespace agfxtest
         result.groupSizeX = compiled.tgSizeX;
         result.groupSizeY = compiled.tgSizeY;
         result.groupSizeZ = compiled.tgSizeZ;
+        result.meshSizeX = compiled.meshSizeX;
+        result.meshSizeY = compiled.meshSizeY;
+        result.meshSizeZ = compiled.meshSizeZ;
+        result.taskSizeX = compiled.taskSizeX;
+        result.taskSizeY = compiled.taskSizeY;
+        result.taskSizeZ = compiled.taskSizeZ;
         free(compiled.compiledCode);
         return result;
     }

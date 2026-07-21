@@ -100,3 +100,50 @@ void main_sample_3d_cs(uint3 id : SV_DispatchThreadID)
 
     dst.Store(int2(id.x, id.y + id.z * g_Constants.height), texel);
 }
+
+// The cube entry point takes the same (width, height * sliceCount) destination as the layered ones,
+// with sliceCount pinned to 6: band f holds the result of sampling cube face f.
+//
+// A cube texture is not addressed by a coordinate but by a *direction*, so the test has to invert
+// the hardware's face-selection rule: FaceDirection() maps (face, uv) to the direction that should
+// land back on exactly that face at exactly that uv. If AGFX and the backend agree on face order and
+// orientation, band f reproduces the seeded layer f. If a backend swaps two faces, or flips one's
+// s/t axes, the corresponding band shows the wrong layer or a mirrored one -- which is visible
+// against the seed's per-slice brightness gradient rather than being a subtle interior difference.
+//
+// The signs follow the standard D3D/Metal cube convention; they are the whole content of this
+// helper, so getting them wrong here would mean testing the test rather than the backend.
+float3 FaceDirection(uint face, float2 uv)
+{
+    const float s = 2.0f * uv.x - 1.0f;
+    const float t = 2.0f * uv.y - 1.0f;
+
+    switch (face) {
+    case 0: return float3( 1.0f,   -t,   -s); // +X
+    case 1: return float3(-1.0f,   -t,    s); // -X
+    case 2: return float3(    s, 1.0f,    t); // +Y
+    case 3: return float3(    s, -1.0f,  -t); // -Y
+    case 4: return float3(    s,   -t, 1.0f); // +Z
+    default: return float3(  -s,   -t, -1.0f); // -Z
+    }
+}
+
+[numthreads(8, 8, 1)]
+void main_sample_cube_cs(uint3 id : SV_DispatchThreadID)
+{
+    AGFXTextureCube<float4> src = AGFXTextureCube<float4>::Create(g_Constants.source);
+    AGFXSampler smp = AGFXSampler::Create(g_Constants.samplerId);
+    AGFXRWTexture2D<float4> dst = AGFXRWTexture2D<float4>::Create(g_Constants.destination);
+
+    if (id.x >= g_Constants.width || id.y >= g_Constants.height || id.z >= g_Constants.sliceCount) {
+        return;
+    }
+
+    // The direction is deliberately built from the *untransformed* uv: the uv scale/offset the other
+    // entry points use to push coordinates out of range has no meaning for a cube, where leaving a
+    // face wraps onto a neighbour rather than triggering the address mode.
+    const float2 uv = (float2(id.xy) + 0.5f) / float2(g_Constants.width, g_Constants.height);
+    const float4 texel = src.SampleLevel(smp, FaceDirection(id.z, uv), 0.0f);
+
+    dst.Store(int2(id.x, id.y + id.z * g_Constants.height), texel);
+}

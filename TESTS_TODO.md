@@ -12,7 +12,7 @@
 - [x] copy texture to buffer
 - [x] copy texture to buffer slice
 - [x] upload readback roundtrip
-- [ ] compute multi dispatch texture
+- [x] compute multi dispatch texture
 - [x] compute texture load 2D
 - [x] compute texture load 2D array
 - [x] compute texture load 3D
@@ -23,53 +23,53 @@
 - [x] copy buffer to texture region
 - [x] copy buffer to texture
 - [x] copy buffer to texture slice
-- [ ] copy queue to render queue
-- [ ] compute queue to render queue
+- [x] copy queue to render queue
+- [x] compute queue to render queue
 - [x] copy texture to texture
 - [x] copy texture to texture mip
 - [x] copy texture to texture slice
-- [ ] draw alpha blending (one for each blend test op/factor)
+- [x] draw alpha blending (one for each blend test op/factor)
 - [x] draw triangle
-- [ ] draw ccw
-- [ ] draw cw
-- [ ] draw depth clamp
-- [ ] draw depth test (one for each depth test func)
-- [ ] draw fragment discard
+- [x] draw ccw
+- [x] draw cw
+- [x] draw depth clamp
+- [x] draw depth test (one for each depth test func)
+- [x] draw fragment discard
 - [x] draw indexed u16
 - [x] draw indexed
-- [ ] draw lines
-- [ ] draw lines indexed
-- [ ] draw points
-- [ ] draw mesh shader
-- [ ] draw task + mesh shader
+- [x] draw lines
+- [x] draw lines indexed
+- [x] draw points
+- [x] draw mesh shader
+- [x] draw task + mesh shader
 - [ ] multiple draws with push constants
 - [ ] draw parameters (vertexOffset etc)
-- [ ] draw with push constants
+- [x] draw with push constants
 - [x] scissor rect
 - [x] viewport
-- [ ] draw wireframe
+- [x] draw wireframe
 - [x] write to HDR texture
 - [ ] copy -> compute -> render queue
 - [ ] render pass clear face
 - [ ] render pass clear slice
 - [ ] render pass clear mip
 - [ ] render pass actions (one for each action combination except for store DONT_CARE since unsupported with D3D12)
-- [ ] sampler address mode (one for each sampler address mode)
-- [ ] sampler filter (one for each sampler filter)
+- [x] sampler address mode (one for each sampler address mode, except CLAMP_TO_BORDER: no border color in agfxSamplerCreateInfo)
+- [x] sampler filter (one for each sampler filter)
 - [ ] sampler comparison (one for each comparison function)
 - [x] sample 2D texture
 - [x] sample 2D array texture
-- [ ] sample 3D texture
-- [ ] sample cube texture
-- [ ] draw indirect, one command
-- [ ] draw indexed indirect, one command
-- [ ] draw mesh indirect, one command
-- [ ] draw mesh tasks indirect, one command
-- [ ] draw indirect, 3 commands + drawID
-- [ ] draw indexed indirect, 3 commands + drawID
-- [ ] draw mesh indirect, 3 commands + drawID
-- [ ] draw mesh tasks indirect, 3 commands + drawID
-- [ ] dispatch indirect
+- [x] sample 3D texture
+- [x] sample cube texture
+- [x] draw indirect, one command
+- [x] draw indexed indirect, one command
+- [x] draw mesh indirect, one command
+- [x] draw mesh tasks indirect, one command
+- [x] draw indirect, 3 commands + drawID
+- [x] draw indexed indirect, 3 commands + drawID
+- [x] draw mesh indirect, 3 commands + drawID
+- [x] draw mesh tasks indirect, 3 commands + drawID
+- [x] dispatch indirect
 - [ ] sample depth texture (d32->r32)
 - [x] texture view format reinterpretation
 - [x] copy texture region
@@ -78,8 +78,8 @@
 - [ ] render to texture slice
 - [ ] render to texture face
 - [ ] render to texture mip
-- [ ] depth write disabled
-- [ ] pipeline cull mode
+- [x] depth write disabled
+- [x] pipeline cull mode
 - [x] compute shared memory
 - [ ] compute wave ops
 - [ ] texture gather

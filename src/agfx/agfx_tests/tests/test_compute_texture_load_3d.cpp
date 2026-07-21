@@ -19,10 +19,10 @@
 // Note that AGFXTexture3D::Load takes (x, y, z, mip) while the array flavor takes (x, y, slice) —
 // one of the few places the two otherwise-parallel shader paths genuinely differ, which is most of
 // why this test exists alongside the 2D array one.
-//
-// There is no Ez variant: ez::Context only exposes CreateTexture2D.
 
 #include "../test_gpu.h"
+
+#include <agfx/agfx_ez.hpp>
 
 namespace
 {
@@ -275,6 +275,94 @@ AGFX_TEST_TEXTURE(ComputeTextureLoad3D, Cpp, kWidth, kHeight* kDepth)
     Image image;
     const bool readOk = ReadbackTexture3DStack(device.Get(), queue, target, kWidth, kHeight, kDepth,
                                                     kFormat, AGFX_RESOURCE_STATE_UNORDERED_ACCESS, image);
+    AGFX_EXPECT_MSG(readOk, "3d texture readback failed");
+
+    ExpectImageMatchesGolden(ctx, kGolden, image);
+}
+
+AGFX_TEST_TEXTURE(ComputeTextureLoad3D, Ez, kWidth, kHeight* kDepth)
+{
+    agfx::ez::ContextCreateInfo contextInfo{};
+    contextInfo.deviceInfo = DefaultDeviceCreateInfo();
+    contextInfo.windowHandle = nullptr; // headless: no swap chain
+    contextInfo.width = kWidth;
+    contextInfo.height = kHeight;
+    agfx::ez::Context context(contextInfo);
+
+    const CompiledShader writeShader =
+        CompileTestShader("texture_volume.hlsl", AGFX_SHADER_STAGE_COMPUTE, "main_write_3d_cs");
+    const CompiledShader loadShader =
+        CompileTestShader("texture_volume.hlsl", AGFX_SHADER_STAGE_COMPUTE, "main_load_3d_cs");
+    AGFX_EXPECT_MSG(writeShader.Valid(), "failed to compile texture_volume.hlsl:main_write_3d_cs");
+    AGFX_EXPECT_MSG(loadShader.Valid(), "failed to compile texture_volume.hlsl:main_load_3d_cs");
+
+    agfx::Device& device = context.GetDevice();
+
+    const agfxTextureUsage usage =
+        (agfxTextureUsage)(AGFX_TEXTURE_USAGE_STORAGE | AGFX_TEXTURE_USAGE_SAMPLED);
+    agfx::ez::Texture3D source = context.CreateTexture3D(kWidth, kHeight, kDepth, kFormat, usage);
+    agfx::ez::Texture3D target = context.CreateTexture3D(kWidth, kHeight, kDepth, kFormat, usage);
+
+    agfx::ComputePipeline writePipeline;
+    agfx::ComputePipeline loadPipeline;
+    {
+        agfx::ShaderModule writeModule(device.Get(),
+            CreateShaderModule(device.Get(), writeShader, "main_write_3d_cs", AGFX_SHADER_MODULE_TYPE_COMPUTE));
+        agfx::ShaderModule loadModule(device.Get(),
+            CreateShaderModule(device.Get(), loadShader, "main_load_3d_cs", AGFX_SHADER_MODULE_TYPE_COMPUTE));
+        writePipeline = device.CreateComputePipeline(ComputePipelineInfo("3d seed", writeModule));
+        loadPipeline = device.CreateComputePipeline(ComputePipelineInfo("3d load", loadModule));
+    }
+    AGFX_EXPECT_NOT_NULL(writePipeline.Get());
+    AGFX_EXPECT_NOT_NULL(loadPipeline.Get());
+
+    // The SRV/UAV pair ez hands out for the same texture is exactly what the C and C++ flavors build
+    // by hand -- the source is written through its UAV, then read back through its SRV.
+    agfx::ez::ShaderBindings seedBindings;
+    seedBindings.Write(0u); // unused source slot
+    seedBindings.BindTexture(source.UAV());
+    seedBindings.Write(kWidth);
+    seedBindings.Write(kHeight);
+    seedBindings.Write(kDepth);
+
+    agfx::ez::ShaderBindings loadBindings;
+    loadBindings.BindTexture(source.SRV());
+    loadBindings.BindTexture(target.UAV());
+    loadBindings.Write(kWidth);
+    loadBindings.Write(kHeight);
+    loadBindings.Write(kDepth);
+
+    device.MakeResourcesResident();
+
+    {
+        agfx::ez::Frame frame = context.BeginFrame();
+        context.TransitionTexture(source, AGFX_RESOURCE_STATE_UNORDERED_ACCESS);
+        context.TransitionTexture(target, AGFX_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        // ez deliberately has no compute-pass sugar; drop to the frame's raw command buffer.
+        {
+            agfx::ComputePass pass = context.GetCurrentCommandBuffer().BeginComputePass("compute texture load 3d");
+            pass.SetPipeline(writePipeline);
+            pass.PushConstants(seedBindings.Data(), seedBindings.Size());
+            pass.Dispatch(kGroupsX, kGroupsY, kGroupsZ);
+        }
+
+        // The seed writes through a UAV and the load reads through an SRV, so the source needs a real
+        // state transition between the two passes, not just a UAV barrier.
+        context.TransitionTexture(source, AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+        {
+            agfx::ComputePass pass = context.GetCurrentCommandBuffer().BeginComputePass("compute texture load 3d");
+            pass.SetPipeline(loadPipeline);
+            pass.PushConstants(loadBindings.Data(), loadBindings.Size());
+            pass.Dispatch(kGroupsX, kGroupsY, kGroupsZ);
+        }
+    }
+    context.DrainGPU();
+
+    Image image;
+    const bool readOk = ReadbackTexture3DStack(device.Get(), context.GetGraphicsQueue(), target.Raw(), kWidth,
+                                               kHeight, kDepth, kFormat, target.State(), image);
     AGFX_EXPECT_MSG(readOk, "3d texture readback failed");
 
     ExpectImageMatchesGolden(ctx, kGolden, image);

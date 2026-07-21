@@ -69,13 +69,26 @@ namespace agfxtest
 
     // --- Shaders --------------------------------------------------------------------------
 
-    /// @brief A compiled shader blob plus the thread group size the compiler reflected out of it.
+    /// @brief A compiled shader blob plus the thread group sizes the compiler reflected out of it.
+    ///
+    /// The mesh/task sizes are carried separately from groupSize* rather than reusing it: a mesh
+    /// pipeline needs both at once when a task shader is present, and agfxRenderPipelineCreateInfo
+    /// takes them in separate fields. They must match the shader's declared [numthreads(...)] or
+    /// dispatch counts disagree between backends, so they are reflected rather than hardcoded.
     struct CompiledShader
     {
         std::vector<uint8_t> code;
         uint32_t groupSizeX = 0;
         uint32_t groupSizeY = 0;
         uint32_t groupSizeZ = 0;
+
+        uint32_t meshSizeX = 0;
+        uint32_t meshSizeY = 0;
+        uint32_t meshSizeZ = 0;
+
+        uint32_t taskSizeX = 0;
+        uint32_t taskSizeY = 0;
+        uint32_t taskSizeZ = 0;
 
         bool Valid() const { return !code.empty(); }
     };

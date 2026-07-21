@@ -13,6 +13,8 @@
 
 #include "../test_gpu.h"
 
+#include <agfx/agfx_ez.hpp>
+
 namespace
 {
     using namespace agfxtest;
@@ -207,6 +209,53 @@ AGFX_TEST_TEXTURE(CopyBufferToTextureMip, Cpp, kMipWidth, kMipHeight)
                     "mip 1 readback failed");
     AGFX_EXPECT_MSG(ReadbackTextureSubresource(device.Get(), queue, dest, kBaseWidth, kBaseHeight,
                                                kFormat, AGFX_RESOURCE_STATE_COMMON, 0, 0, mip0),
+                    "mip 0 readback failed");
+    AGFX_EXPECT_MSG(ImageEqualsRgba8(mip1, sourcePixels), "mip 1 does not hold the buffer's contents");
+    AGFX_EXPECT_MSG(ImageEqualsRgba8(mip0, seed0), "the copy disturbed mip 0");
+
+    ExpectImageMatchesGolden(ctx, kGolden, mip1);
+}
+
+AGFX_TEST_TEXTURE(CopyBufferToTextureMip, Ez, kMipWidth, kMipHeight)
+{
+    agfx::ez::ContextCreateInfo contextInfo{};
+    contextInfo.deviceInfo = DefaultDeviceCreateInfo();
+    contextInfo.windowHandle = nullptr; // headless: no swap chain
+    contextInfo.width = kBaseWidth;
+    contextInfo.height = kBaseHeight;
+    agfx::ez::Context context(contextInfo);
+
+    agfx::Device& device = context.GetDevice();
+
+    agfx::ez::Texture2D dest = context.CreateTexture2D(kBaseWidth, kBaseHeight, kFormat,
+                                                       AGFX_TEXTURE_USAGE_SAMPLED, nullptr, 0, kMipLevels);
+
+    const std::vector<uint8_t> seed0 = SeedPixels(kBaseWidth, kBaseHeight);
+    const std::vector<uint8_t> seed1 = SeedPixels(kMipWidth, kMipHeight);
+    const std::vector<uint8_t> sourcePixels = SourcePixels();
+    context.UploadTexture(dest, agfxTextureRegion{0, 0, 0, kBaseWidth, kBaseHeight, 1}, 0, 0, seed0.data(),
+                          (uint32_t)seed0.size(), kBaseWidth * kBytesPerPixel);
+    context.UploadTexture(dest, MipRegion(), kCopyMip, 0, seed1.data(), (uint32_t)seed1.size(), kMipRowBytes);
+    agfx::ez::Buffer source = context.CreateStructuredBuffer(sourcePixels.data(), kMipBytes, kBytesPerPixel,
+                                                             /*shaderWritable*/ true);
+
+    device.MakeResourcesResident();
+
+    {
+        agfx::ez::Frame frame = context.BeginFrame();
+        context.TransitionBuffer(source, AGFX_RESOURCE_STATE_COPY_SOURCE);
+        context.TransitionTexture(dest, AGFX_RESOURCE_STATE_COPY_DEST, kCopyMip, 0);
+        context.CopyBufferToTexture(source, dest, MipRegion(), kCopyMip, 0, kMipRowBytes, (uint32_t)kMipBytes);
+    }
+    context.DrainGPU();
+
+    Image mip1;
+    Image mip0;
+    AGFX_EXPECT_MSG(ReadbackTextureSubresource(device.Get(), context.GetGraphicsQueue(), dest.Raw(), kMipWidth,
+                                               kMipHeight, kFormat, dest.StateAt(kCopyMip, 0), kCopyMip, 0, mip1),
+                    "mip 1 readback failed");
+    AGFX_EXPECT_MSG(ReadbackTextureSubresource(device.Get(), context.GetGraphicsQueue(), dest.Raw(), kBaseWidth,
+                                               kBaseHeight, kFormat, dest.StateAt(0, 0), 0, 0, mip0),
                     "mip 0 readback failed");
     AGFX_EXPECT_MSG(ImageEqualsRgba8(mip1, sourcePixels), "mip 1 does not hold the buffer's contents");
     AGFX_EXPECT_MSG(ImageEqualsRgba8(mip0, seed0), "the copy disturbed mip 0");

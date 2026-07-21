@@ -12,11 +12,10 @@
 // 64x256 golden. Each layer is tinted by its index, so a UAV view that collapses onto layer 0, a
 // dispatch whose Z dimension is dropped, or a backend that writes the layers in the wrong order all
 // come out as a visibly wrong stack rather than a plausible image.
-//
-// There is no Ez variant: ez::Context only exposes CreateTexture2D, so array textures aren't
-// expressible through that layer.
 
 #include "../test_gpu.h"
+
+#include <agfx/agfx_ez.hpp>
 
 namespace
 {
@@ -196,6 +195,64 @@ AGFX_TEST_TEXTURE(ComputeTextureWrite2DArray, Cpp, kWidth, kHeight* kLayers)
     Image image;
     const bool readOk = ReadbackTexture2DArrayStack(device.Get(), queue, target, kWidth, kHeight, kLayers,
                                                     kFormat, AGFX_RESOURCE_STATE_UNORDERED_ACCESS, image);
+    AGFX_EXPECT_MSG(readOk, "array texture readback failed");
+
+    ExpectImageMatchesGolden(ctx, kGolden, image);
+}
+
+AGFX_TEST_TEXTURE(ComputeTextureWrite2DArray, Ez, kWidth, kHeight* kLayers)
+{
+    agfx::ez::ContextCreateInfo contextInfo{};
+    contextInfo.deviceInfo = DefaultDeviceCreateInfo();
+    contextInfo.windowHandle = nullptr; // headless: no swap chain
+    contextInfo.width = kWidth;
+    contextInfo.height = kHeight;
+    agfx::ez::Context context(contextInfo);
+
+    const CompiledShader shader =
+        CompileTestShader("texture_volume.hlsl", AGFX_SHADER_STAGE_COMPUTE, "main_write_array_cs");
+    AGFX_EXPECT_MSG(shader.Valid(), "failed to compile texture_volume.hlsl:main_write_array_cs");
+
+    agfx::Device& device = context.GetDevice();
+
+    agfx::ez::Texture2DArray target = context.CreateTexture2DArray(
+        kWidth, kHeight, kLayers, kFormat,
+        (agfxTextureUsage)(AGFX_TEXTURE_USAGE_STORAGE | AGFX_TEXTURE_USAGE_SAMPLED));
+
+    agfx::ComputePipeline pipeline;
+    {
+        agfx::ShaderModule module(device.Get(),
+            CreateShaderModule(device.Get(), shader, "main_write_array_cs", AGFX_SHADER_MODULE_TYPE_COMPUTE));
+        pipeline = device.CreateComputePipeline(ComputePipelineInfo(module));
+    }
+    AGFX_EXPECT_NOT_NULL(pipeline.Get());
+
+    // The default UAV spans every layer -- the same all-layer view UavInfo() builds by hand -- so the
+    // one dispatch can address them all through the shader's z coordinate.
+    agfx::ez::ShaderBindings bindings;
+    bindings.Write(0u); // unused source slot
+    bindings.BindTexture(target.UAV());
+    bindings.Write(kWidth);
+    bindings.Write(kHeight);
+    bindings.Write(kLayers);
+
+    device.MakeResourcesResident();
+
+    {
+        agfx::ez::Frame frame = context.BeginFrame();
+        context.TransitionTexture(target, AGFX_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        // ez deliberately has no compute-pass sugar; drop to the frame's raw command buffer.
+        agfx::ComputePass pass = context.GetCurrentCommandBuffer().BeginComputePass("compute texture write 2d array");
+        pass.SetPipeline(pipeline);
+        pass.PushConstants(bindings.Data(), bindings.Size());
+        pass.Dispatch(kGroupsX, kGroupsY, kGroupsZ);
+    }
+    context.DrainGPU();
+
+    Image image;
+    const bool readOk = ReadbackTexture2DArrayStack(device.Get(), context.GetGraphicsQueue(), target.Raw(), kWidth,
+                                                    kHeight, kLayers, kFormat, target.State(), image);
     AGFX_EXPECT_MSG(readOk, "array texture readback failed");
 
     ExpectImageMatchesGolden(ctx, kGolden, image);

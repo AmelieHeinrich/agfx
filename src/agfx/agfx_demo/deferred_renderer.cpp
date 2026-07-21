@@ -840,6 +840,7 @@ void DeferredRenderer::RenderGBuffer(agfxDevice* device, agfxCommandBuffer* cmdB
     passInfo.depthAttachment.renderTarget = depthRT;
     passInfo.depthAttachment.loadOp = AGFX_LOAD_OPERATION_CLEAR;
     passInfo.depthAttachment.storeOp = AGFX_STORE_OPERATION_STORE;
+    passInfo.depthAttachment.clearDepth = 1.0f;
     passInfo.width = width;
     passInfo.height = height;
     passInfo.name = "GBuffer";
@@ -957,6 +958,7 @@ void DeferredRenderer::RenderShadows(agfxDevice* device, agfxCommandBuffer* cmdB
         passInfo.depthAttachment.renderTarget = shadowCascadeRT[c];
         passInfo.depthAttachment.loadOp = AGFX_LOAD_OPERATION_CLEAR;
         passInfo.depthAttachment.storeOp = AGFX_STORE_OPERATION_STORE;
+        passInfo.depthAttachment.clearDepth = 1.0f;
         passInfo.width = csm.shadowMapResolution;
         passInfo.height = csm.shadowMapResolution;
         passInfo.name = "ShadowCascade";

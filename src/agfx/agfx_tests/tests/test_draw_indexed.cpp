@@ -328,10 +328,9 @@ AGFX_TEST_TEXTURE(DrawIndexed, Ez, kWidth, kHeight)
     agfx::ez::Texture2D target = context.CreateTexture2D(kWidth, kHeight, kFormat,
                                                          AGFX_TEXTURE_USAGE_COLOR_ATTACHMENT);
 
-    // ez's CreateIndexBuffer leaves the stride at 0, which the backends read as 32-bit indices —
-    // the u16 case simply isn't expressible through ez, hence no Ez variant in the u16 twin.
     agfx::ez::Buffer vertexBuffer = context.CreateStructuredBuffer(kVertices, sizeof(kVertices), sizeof(Vertex));
-    agfx::ez::Buffer indexBuffer = context.CreateIndexBuffer(kIndices, sizeof(kIndices));
+    // The stride selects the index type; 4 is CreateIndexBuffer's default. The u16 twin passes 2.
+    agfx::ez::Buffer indexBuffer = context.CreateIndexBuffer(kIndices, sizeof(kIndices), sizeof(uint32_t));
 
     agfx::ez::ShaderBindings bindings;
     bindings.BindBuffer(vertexBuffer.View(AGFX_BUFFER_VIEW_TYPE_STRUCTURED));

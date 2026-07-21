@@ -13,6 +13,8 @@
 
 #include "../test_gpu.h"
 
+#include <agfx/agfx_ez.hpp>
+
 namespace
 {
     using namespace agfxtest;
@@ -215,6 +217,62 @@ AGFX_TEST_TEXTURE(CopyBufferToTextureSlice, Cpp, kWidth, kHeight)
         Image neighbour;
         AGFX_EXPECT_MSG(ReadbackTextureSubresource(device.Get(), queue, dest, kWidth, kHeight, kFormat,
                                                    AGFX_RESOURCE_STATE_COMMON, 0, layer, neighbour),
+                        "neighbour layer readback failed");
+        AGFX_EXPECT_MSG(ImageEqualsRgba8(neighbour, SeedPixels(layer)),
+                        "the copy disturbed a layer other than layer 2");
+    }
+
+    ExpectImageMatchesGolden(ctx, kGolden, target);
+}
+
+AGFX_TEST_TEXTURE(CopyBufferToTextureSlice, Ez, kWidth, kHeight)
+{
+    agfx::ez::ContextCreateInfo contextInfo{};
+    contextInfo.deviceInfo = DefaultDeviceCreateInfo();
+    contextInfo.windowHandle = nullptr; // headless: no swap chain
+    contextInfo.width = kWidth;
+    contextInfo.height = kHeight;
+    agfx::ez::Context context(contextInfo);
+
+    agfx::Device& device = context.GetDevice();
+
+    agfx::ez::Texture2DArray dest = context.CreateTexture2DArray(kWidth, kHeight, kLayerCount, kFormat,
+                                                                  AGFX_TEXTURE_USAGE_SAMPLED);
+
+    const std::vector<uint8_t> sourcePixels = SourcePixels();
+    for (uint32_t layer = 0; layer < kLayerCount; ++layer) {
+        const std::vector<uint8_t> pixels = SeedPixels(layer);
+        context.UploadTexture(dest, LayerRegion(), 0, layer, pixels.data(), (uint32_t)pixels.size(), kRowBytes);
+    }
+    agfx::ez::Buffer source = context.CreateStructuredBuffer(sourcePixels.data(), kLayerBytes, kBytesPerPixel,
+                                                             /*shaderWritable*/ true);
+
+    device.MakeResourcesResident();
+
+    {
+        agfx::ez::Frame frame = context.BeginFrame();
+        context.TransitionBuffer(source, AGFX_RESOURCE_STATE_COPY_SOURCE);
+        context.TransitionTexture(dest, AGFX_RESOURCE_STATE_COPY_DEST, 0, kCopyLayer);
+        context.CopyBufferToTexture(source, dest, LayerRegion(), 0, kCopyLayer, kRowBytes, (uint32_t)kLayerBytes);
+    }
+    context.DrainGPU();
+
+    Image target;
+    AGFX_EXPECT_MSG(ReadbackTextureSubresource(device.Get(), context.GetGraphicsQueue(), dest.Raw(), kWidth,
+                                               kHeight, kFormat, dest.StateAt(0, kCopyLayer), 0, kCopyLayer, target),
+                    "layer readback failed");
+    AGFX_EXPECT_MSG(ImageEqualsRgba8(target, sourcePixels),
+                    "layer 2 does not hold the buffer's contents");
+
+    // Only layer 2 was transitioned, so the tracker still reports COMMON for its neighbours -- which
+    // is exactly the per-subresource bookkeeping being exercised, not an incidental detail.
+    for (uint32_t layer = 0; layer < kLayerCount; ++layer) {
+        if (layer == kCopyLayer) {
+            continue;
+        }
+        Image neighbour;
+        AGFX_EXPECT_MSG(ReadbackTextureSubresource(device.Get(), context.GetGraphicsQueue(), dest.Raw(), kWidth,
+                                                   kHeight, kFormat, dest.StateAt(0, layer), 0, layer, neighbour),
                         "neighbour layer readback failed");
         AGFX_EXPECT_MSG(ImageEqualsRgba8(neighbour, SeedPixels(layer)),
                         "the copy disturbed a layer other than layer 2");

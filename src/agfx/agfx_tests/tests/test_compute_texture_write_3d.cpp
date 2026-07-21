@@ -15,10 +15,10 @@
 // Worth keeping separate from the 2D array test even though the shaders are near-identical: a 3D
 // texture's slices are a different addressing mechanism from array layers on both backends (region
 // z origin vs. subresource layer), and only one of the two paths being right is a real failure mode.
-//
-// There is no Ez variant: ez::Context only exposes CreateTexture2D.
 
 #include "../test_gpu.h"
+
+#include <agfx/agfx_ez.hpp>
 
 namespace
 {
@@ -198,6 +198,63 @@ AGFX_TEST_TEXTURE(ComputeTextureWrite3D, Cpp, kWidth, kHeight* kDepth)
     Image image;
     const bool readOk = ReadbackTexture3DStack(device.Get(), queue, target, kWidth, kHeight, kDepth,
                                                kFormat, AGFX_RESOURCE_STATE_UNORDERED_ACCESS, image);
+    AGFX_EXPECT_MSG(readOk, "3d texture readback failed");
+
+    ExpectImageMatchesGolden(ctx, kGolden, image);
+}
+
+AGFX_TEST_TEXTURE(ComputeTextureWrite3D, Ez, kWidth, kHeight* kDepth)
+{
+    agfx::ez::ContextCreateInfo contextInfo{};
+    contextInfo.deviceInfo = DefaultDeviceCreateInfo();
+    contextInfo.windowHandle = nullptr; // headless: no swap chain
+    contextInfo.width = kWidth;
+    contextInfo.height = kHeight;
+    agfx::ez::Context context(contextInfo);
+
+    const CompiledShader shader =
+        CompileTestShader("texture_volume.hlsl", AGFX_SHADER_STAGE_COMPUTE, "main_write_3d_cs");
+    AGFX_EXPECT_MSG(shader.Valid(), "failed to compile texture_volume.hlsl:main_write_3d_cs");
+
+    agfx::Device& device = context.GetDevice();
+
+    agfx::ez::Texture3D target = context.CreateTexture3D(
+        kWidth, kHeight, kDepth, kFormat, (agfxTextureUsage)(AGFX_TEXTURE_USAGE_STORAGE | AGFX_TEXTURE_USAGE_SAMPLED));
+
+    agfx::ComputePipeline pipeline;
+    {
+        agfx::ShaderModule module(device.Get(),
+            CreateShaderModule(device.Get(), shader, "main_write_3d_cs", AGFX_SHADER_MODULE_TYPE_COMPUTE));
+        pipeline = device.CreateComputePipeline(ComputePipelineInfo(module));
+    }
+    AGFX_EXPECT_NOT_NULL(pipeline.Get());
+
+    // target.UAV() defaults to the whole resource, which for a 3D texture is the one-layer,
+    // one-mip view the C and C++ flavors spell out by hand in UavInfo().
+    agfx::ez::ShaderBindings bindings;
+    bindings.Write(0u); // unused source slot
+    bindings.BindTexture(target.UAV());
+    bindings.Write(kWidth);
+    bindings.Write(kHeight);
+    bindings.Write(kDepth);
+
+    device.MakeResourcesResident();
+
+    {
+        agfx::ez::Frame frame = context.BeginFrame();
+        context.TransitionTexture(target, AGFX_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        // ez deliberately has no compute-pass sugar; drop to the frame's raw command buffer.
+        agfx::ComputePass pass = context.GetCurrentCommandBuffer().BeginComputePass("compute texture write 3d");
+        pass.SetPipeline(pipeline);
+        pass.PushConstants(bindings.Data(), bindings.Size());
+        pass.Dispatch(kGroupsX, kGroupsY, kGroupsZ);
+    }
+    context.DrainGPU();
+
+    Image image;
+    const bool readOk = ReadbackTexture3DStack(device.Get(), context.GetGraphicsQueue(), target.Raw(), kWidth,
+                                               kHeight, kDepth, kFormat, target.State(), image);
     AGFX_EXPECT_MSG(readOk, "3d texture readback failed");
 
     ExpectImageMatchesGolden(ctx, kGolden, image);

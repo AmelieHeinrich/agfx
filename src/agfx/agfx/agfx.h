@@ -1175,8 +1175,12 @@ typedef struct agfxRenderPassAttachment {
     agfxLoadOp loadOp;
     /// @brief Whether the attachment's contents are written back to memory at the end of the pass.
     agfxStoreOp storeOp;
-    /// @brief The RGBA clear color used when loadOp is AGFX_LOAD_OPERATION_CLEAR. Unused for depth attachments.
+    /// @brief The RGBA clear color used when loadOp is AGFX_LOAD_OPERATION_CLEAR. Unused for depth attachments, which use clearDepth.
     float clearColor[4];
+    /// @brief The depth clear value used when loadOp is AGFX_LOAD_OPERATION_CLEAR. Unused for color attachments.
+    /// @note Zero-initializing this struct gives 0.0f, which clears to the near plane. Reversed-Z aside,
+    ///       the conventional value is 1.0f and must be set explicitly.
+    float clearDepth;
 } agfxRenderPassAttachment;
 
 /// @brief A structure containing information for beginning an agfxRenderPass.

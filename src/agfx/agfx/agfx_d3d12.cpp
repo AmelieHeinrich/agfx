@@ -1595,7 +1595,7 @@ agfxRenderPass* agfxRenderPassBegin(agfxCommandBuffer* cmdBuffer, const agfxRend
     if (createInfo->hasDepthAttachment) {
         dsvHandle = createInfo->depthAttachment.renderTarget->descriptor.cpuHandle;
         if (createInfo->depthAttachment.loadOp == AGFX_LOAD_OPERATION_CLEAR) {
-            commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+            commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, createInfo->depthAttachment.clearDepth, 0, 0, nullptr);
         }
     }
 
