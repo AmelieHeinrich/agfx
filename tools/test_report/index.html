@@ -1,0 +1,916 @@
+<!DOCTYPE html>
+<!--
+  @ Author: Amélie Heinrich @ Amélie Heinrich
+  @ Create Time: 2026-07-21 00:00:00
+  @ Copyright: Copyright (c) 2026 Amélie Heinrich. All rights reserved.
+
+  Viewer for test_results/results.json, produced by the agfx_tests runner.
+
+  Because browsers block fetch() over file://, serve the repo root and open this page through it:
+
+      python3 -m http.server 8000
+      open http://localhost:8000/tools/test_report/
+
+  Point it at a different results file with ?results=<url> (e.g. ?results=/test_results_fail/results.json).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agfx test report</title>
+<style>
+  :root {
+    --bg: #0e1014;
+    --panel: #171a21;
+    --panel-2: #1e222b;
+    --border: #2a2f3a;
+    --text: #e5e8ee;
+    --muted: #8b93a3;
+    --pass: #3fb950;
+    --fail: #f4564a;
+    --skip: #d2a13a;
+    --accent: #4a9eff;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  header {
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+
+  .title-row { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .meta { color: var(--muted); font-size: 12px; }
+
+  .counts { display: flex; gap: 8px; margin-left: auto; }
+  .count {
+    padding: 3px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+  }
+  .count.pass { color: var(--pass); }
+  .count.fail { color: var(--fail); }
+  .count.skip { color: var(--skip); }
+
+  .filters { display: flex; gap: 16px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
+  .group { display: flex; gap: 6px; align-items: center; }
+  .group-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+
+  .chip {
+    padding: 4px 11px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 12px;
+    font-family: inherit;
+  }
+  .chip:hover { color: var(--text); border-color: #3a4150; }
+  .chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  input[type="search"] {
+    padding: 5px 11px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+    font: inherit;
+    min-width: 200px;
+  }
+  input[type="search"]:focus { outline: none; border-color: var(--accent); }
+
+  main { padding: 22px 24px 60px; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 12px;
+  }
+
+  .card {
+    /* Buttons don't behave as grid/flow containers by default — without display:block the
+       content collapses and neighbouring cards overlap. */
+    display: block;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--muted);
+    border-radius: 8px;
+    padding: 13px 15px;
+    cursor: pointer;
+    text-align: left;
+    color: inherit;
+    font: inherit;
+    width: 100%;
+    height: auto;
+    overflow: hidden;
+  }
+  .card:hover { border-color: #3a4150; background: var(--panel-2); }
+  .card.passed { border-left-color: var(--pass); }
+  .card.failed { border-left-color: var(--fail); }
+  .card.skipped { border-left-color: var(--skip); }
+
+  .card-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .card-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card-top .tag { flex: none; }
+  .card-name { font-weight: 600; }
+  .card-time { margin-left: auto; color: var(--muted); font-size: 11px; font-family: var(--mono); }
+
+  .tag {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    padding: 2px 7px;
+    border-radius: 4px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .card-msg {
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--fail);
+    font-family: var(--mono);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  /* --- Card previews --- */
+  .preview { margin-top: 10px; }
+
+  .preview-shots { display: flex; gap: 8px; align-items: flex-end; }
+  .preview-shot { text-align: center; }
+  .preview-shot img {
+    display: block;
+    width: 62px;
+    height: 62px;
+    object-fit: contain;
+    image-rendering: pixelated;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: repeating-conic-gradient(#1a1d24 0% 25%, #14171d 0% 50%) 50% / 10px 10px;
+  }
+  .preview-shot span {
+    display: block;
+    margin-top: 3px;
+    font-size: 9px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .05em;
+  }
+  .preview-note {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    text-align: right;
+    align-self: center;
+  }
+  .preview-note b { display: block; font-size: 13px; color: var(--text); }
+  .preview-note.bad b { color: var(--fail); }
+  .preview-note.good b { color: var(--pass); }
+
+  /* Buffer preview: one bar across the whole buffer, differing regions lit in red. */
+  .diff-map {
+    display: flex;
+    height: 16px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+    background: var(--panel-2);
+  }
+  .diff-map i { flex: 1 1 0; background: #2c3240; }
+  .diff-map i.diff { background: var(--fail); }
+  .preview-legend {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 4px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+  }
+
+  .empty { color: var(--muted); padding: 40px; text-align: center; }
+  .error-box {
+    background: var(--panel);
+    border: 1px solid var(--fail);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  .error-box h2 { margin: 0 0 8px; font-size: 15px; color: var(--fail); }
+  .error-box code { font-family: var(--mono); background: var(--panel-2); padding: 1px 5px; border-radius: 3px; }
+
+  /* --- Modal --- */
+  dialog {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0;
+    width: min(1200px, 94vw);
+    max-height: 92vh;
+  }
+  dialog::backdrop { background: rgba(0, 0, 0, .72); }
+
+  .modal-head {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    position: sticky;
+    top: 0;
+    background: var(--panel);
+  }
+  .modal-head h2 { margin: 0; font-size: 16px; }
+  .modal-body { padding: 18px 20px 24px; overflow: auto; max-height: calc(92vh - 62px); }
+  .close-btn {
+    margin-left: auto;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    padding: 4px 10px;
+    cursor: pointer;
+    font: inherit;
+  }
+  .close-btn:hover { color: var(--text); }
+
+  .fail-msg {
+    background: rgba(244, 86, 74, .1);
+    border: 1px solid rgba(244, 86, 74, .35);
+    border-radius: 6px;
+    padding: 10px 13px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: #ffb3ad;
+    white-space: pre-wrap;
+    margin-bottom: 18px;
+    overflow-wrap: anywhere;
+  }
+  .source-line { color: var(--muted); font-size: 12px; font-family: var(--mono); margin-bottom: 18px; }
+
+  .stats { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 16px; }
+  .stat-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+  .stat-value { font-family: var(--mono); font-size: 15px; }
+  .stat-value.bad { color: var(--fail); }
+  .stat-value.good { color: var(--pass); }
+
+  /* --- Texture view --- */
+  .triptych { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 18px; }
+  .shot { text-align: center; }
+  .shot h3 { margin: 0 0 6px; font-size: 12px; color: var(--muted); font-weight: 600; }
+  .shot canvas {
+    width: 100%;
+    max-width: 320px;
+    image-rendering: pixelated;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background:
+      repeating-conic-gradient(#1a1d24 0% 25%, #14171d 0% 50%) 50% / 16px 16px;
+    cursor: crosshair;
+    display: block;
+    margin: 0 auto;
+  }
+
+  .magnifier {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    background: var(--panel-2);
+  }
+  .magnifier.idle { color: var(--muted); text-align: center; padding: 26px; }
+  .mag-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .mag-cell { text-align: center; }
+  .mag-cell h4 { margin: 0 0 6px; font-size: 11px; color: var(--muted); font-weight: 600; }
+  .mag-cell canvas {
+    width: 100%;
+    max-width: 200px;
+    image-rendering: pixelated;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  .readout {
+    margin-top: 12px;
+    font-family: var(--mono);
+    font-size: 12px;
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    justify-content: center;
+    color: var(--muted);
+  }
+  .readout b { color: var(--text); font-weight: 600; }
+  .swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    border: 1px solid var(--border);
+    vertical-align: -1px;
+    margin-right: 4px;
+  }
+
+  /* --- Buffer hex view --- */
+  .hex-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  .hex-panes { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .hex-pane h3 { margin: 0 0 6px; font-size: 12px; color: var(--muted); font-weight: 600; }
+  .hex-scroll {
+    max-height: 440px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel-2);
+    padding: 10px 12px;
+  }
+  .hex-line { font-family: var(--mono); font-size: 12px; white-space: pre; line-height: 1.65; }
+  .hex-line.has-diff { background: rgba(244, 86, 74, .07); }
+  .hex-off { color: var(--muted); }
+  .hex-byte.diff { color: var(--fail); font-weight: 700; }
+  .hex-byte.absent { color: #4a5160; }
+  .hex-ascii { color: var(--muted); }
+  .hex-ascii .diff { color: var(--fail); font-weight: 700; }
+  .hex-line.focus { outline: 1px solid var(--accent); border-radius: 3px; }
+
+  @media (max-width: 900px) {
+    .triptych, .mag-grid, .hex-panes { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="title-row">
+    <h1>agfx test report</h1>
+    <span class="meta" id="meta"></span>
+    <div class="counts" id="counts"></div>
+  </div>
+  <div class="filters" id="filters" hidden>
+    <input type="search" id="search" placeholder="Filter by name…" autocomplete="off">
+    <div class="group">
+      <span class="group-label">Kind</span>
+      <div id="kind-chips" class="group"></div>
+    </div>
+    <div class="group">
+      <span class="group-label">API</span>
+      <div id="api-chips" class="group"></div>
+    </div>
+    <div class="group">
+      <span class="group-label">Status</span>
+      <div id="status-chips" class="group"></div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div id="content"></div>
+</main>
+
+<dialog id="modal">
+  <div class="modal-head">
+    <h2 id="modal-title"></h2>
+    <span class="tag" id="modal-kind"></span>
+    <span class="tag" id="modal-api"></span>
+    <button class="close-btn" id="modal-close">Close ✕</button>
+  </div>
+  <div class="modal-body" id="modal-body"></div>
+</dialog>
+
+<script>
+"use strict";
+
+// --- State --------------------------------------------------------------------------------
+
+const state = {
+  report: null,
+  baseUrl: "",          // Directory holding results.json; artifact paths are relative to it.
+  filtered: [],
+  openIndex: -1,
+  filters: { search: "", kind: new Set(), api: new Set(), status: new Set() },
+};
+
+const MAG_RADIUS = 5;   // A 10x10 region around the cursor (radius 5 each way).
+const MAG_SIZE = MAG_RADIUS * 2;
+
+// --- Loading ------------------------------------------------------------------------------
+
+function resultsCandidates() {
+  const override = new URLSearchParams(location.search).get("results");
+  if (override) return [override];
+  // Served from the repo root, this page lives two directories down.
+  return ["../../test_results/results.json", "./results.json"];
+}
+
+async function load() {
+  let lastError = null;
+  for (const url of resultsCandidates()) {
+    try {
+      const response = await fetch(url, { cache: "no-store" });
+      if (!response.ok) { lastError = `${url} → HTTP ${response.status}`; continue; }
+      const report = await response.json();
+      state.report = report;
+      state.baseUrl = new URL(url, location.href).href.replace(/[^/]*$/, "");
+      render();
+      return;
+    } catch (err) {
+      lastError = `${url} → ${err.message}`;
+    }
+  }
+  showLoadError(lastError);
+}
+
+function showLoadError(detail) {
+  document.getElementById("content").innerHTML = `
+    <div class="error-box">
+      <h2>Couldn't load results.json</h2>
+      <p>Browsers block <code>fetch()</code> over <code>file://</code>. Serve the repo root and open this page through it:</p>
+      <p><code>python3 -m http.server 8000</code> → <code>http://localhost:8000/tools/test_report/</code></p>
+      <p>Run the suite first with <code>xmake run agfx_tests</code>, or point at another file with
+         <code>?results=/test_results_fail/results.json</code>.</p>
+      ${detail ? `<p class="meta">Last attempt: ${escapeHtml(detail)}</p>` : ""}
+    </div>`;
+}
+
+// --- Rendering ----------------------------------------------------------------------------
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
+function assetUrl(relativePath) {
+  return relativePath ? state.baseUrl + relativePath : "";
+}
+
+function render() {
+  const report = state.report;
+  const summary = report.summary || {};
+
+  document.getElementById("meta").textContent =
+    `${report.device || "unknown device"} · ${report.platform || "?"} · ${report.timestamp || ""}` +
+    (report.updateGoldens ? " · goldens updated" : "");
+
+  document.getElementById("counts").innerHTML = `
+    <span class="count pass">${summary.passed || 0} passed</span>
+    <span class="count fail">${summary.failed || 0} failed</span>
+    ${summary.skipped ? `<span class="count skip">${summary.skipped} skipped</span>` : ""}
+    <span class="count">${(summary.durationMs || 0).toFixed(0)} ms</span>`;
+
+  buildChips();
+  document.getElementById("filters").hidden = false;
+  applyFilters();
+}
+
+function buildChips() {
+  const tests = state.report.tests || [];
+  const build = (containerId, key) => {
+    const values = [...new Set(tests.map(t => t[key]))].sort();
+    const container = document.getElementById(containerId);
+    container.innerHTML = "";
+    for (const value of values) {
+      const chip = document.createElement("button");
+      chip.className = "chip";
+      chip.textContent = value;
+      chip.setAttribute("aria-pressed", "false");
+      chip.onclick = () => {
+        const set = state.filters[key];
+        set.has(value) ? set.delete(value) : set.add(value);
+        chip.setAttribute("aria-pressed", String(set.has(value)));
+        applyFilters();
+      };
+      container.appendChild(chip);
+    }
+  };
+  build("kind-chips", "kind");
+  build("api-chips", "api");
+  build("status-chips", "status");
+}
+
+/// Small at-a-glance preview shown on the card itself, so a failure is recognizable without
+/// opening the modal: the rendered image for texture tests, a diff map for buffer tests.
+function cardPreview(test) {
+  if (test.texture) {
+    const texture = test.texture;
+    const failed = texture.meanError > texture.threshold;
+    const shots = [
+      { label: "output", path: texture.output },
+      { label: "golden", path: texture.golden },
+      // The error map only tells you anything when there is error to see.
+      ...(failed ? [{ label: "flip", path: texture.flip }] : []),
+    ].filter(shot => shot.path);
+
+    if (shots.length === 0) return "";
+    return `
+      <div class="preview preview-shots">
+        ${shots.map(shot => `
+          <div class="preview-shot">
+            <img src="${escapeHtml(assetUrl(shot.path))}" alt="${shot.label}" loading="lazy">
+            <span>${shot.label}</span>
+          </div>`).join("")}
+        <div class="preview-note ${failed ? "bad" : "good"}">
+          <b>${texture.meanError.toFixed(4)}</b>FLIP mean
+        </div>
+      </div>`;
+  }
+
+  if (test.buffer) {
+    const buffer = test.buffer;
+    const size = Number(buffer.size) || 0;
+    if (size === 0) return "";
+
+    // Bucket the byte range into fixed-width cells and light any cell containing a diff, so the
+    // bar reads the same regardless of buffer size.
+    const CELLS = 64;
+    const diffCells = new Set();
+    for (const offset of buffer.diffOffsets || []) {
+      diffCells.add(Math.min(CELLS - 1, Math.floor(Number(offset) / size * CELLS)));
+    }
+    const cells = Array.from({ length: CELLS },
+      (_, i) => `<i class="${diffCells.has(i) ? "diff" : ""}"></i>`).join("");
+
+    return `
+      <div class="preview">
+        <div class="diff-map">${cells}</div>
+        <div class="preview-legend">
+          <span>0</span>
+          <span>${buffer.totalDiffCount ? `${buffer.totalDiffCount} differing bytes` : "identical"}</span>
+          <span>${size} B</span>
+        </div>
+      </div>`;
+  }
+
+  return "";
+}
+
+function applyFilters() {
+  const { search, kind, api, status } = state.filters;
+  const needle = search.toLowerCase();
+
+  state.filtered = (state.report.tests || []).filter(test =>
+    (!needle || test.name.toLowerCase().includes(needle)) &&
+    (kind.size === 0 || kind.has(test.kind)) &&
+    (api.size === 0 || api.has(test.api)) &&
+    (status.size === 0 || status.has(test.status)));
+
+  const content = document.getElementById("content");
+  if (state.filtered.length === 0) {
+    content.innerHTML = `<div class="empty">No tests match these filters.</div>`;
+    return;
+  }
+
+  const grid = document.createElement("div");
+  grid.className = "grid";
+  state.filtered.forEach((test, index) => {
+    const card = document.createElement("button");
+    card.className = `card ${test.status}`;
+    card.innerHTML = `
+      <div class="card-top">
+        <span class="card-name">${escapeHtml(test.name)}</span>
+        <span class="tag">${escapeHtml(test.api)}</span>
+        <span class="tag">${escapeHtml(test.kind)}</span>
+        <span class="card-time">${(test.durationMs || 0).toFixed(1)} ms</span>
+      </div>
+      ${test.status !== "passed" && test.message
+        ? `<div class="card-msg">${escapeHtml(test.message.split("\n")[0])}</div>` : ""}
+      ${cardPreview(test)}`;
+    card.onclick = () => openModal(index);
+    grid.appendChild(card);
+  });
+
+  content.innerHTML = "";
+  content.appendChild(grid);
+}
+
+document.getElementById("search").oninput = event => {
+  state.filters.search = event.target.value;
+  applyFilters();
+};
+
+// --- Modal --------------------------------------------------------------------------------
+
+const modal = document.getElementById("modal");
+
+function openModal(index) {
+  if (index < 0 || index >= state.filtered.length) return;
+  state.openIndex = index;
+  const test = state.filtered[index];
+
+  document.getElementById("modal-title").textContent = test.name;
+  document.getElementById("modal-kind").textContent = test.kind;
+  document.getElementById("modal-api").textContent = test.api;
+
+  const body = document.getElementById("modal-body");
+  body.innerHTML = "";
+
+  if (test.status !== "passed" && test.message) {
+    const box = document.createElement("div");
+    box.className = "fail-msg";
+    box.textContent = test.message;
+    body.appendChild(box);
+  }
+  if (test.source) {
+    const source = document.createElement("div");
+    source.className = "source-line";
+    source.textContent = test.source;
+    body.appendChild(source);
+  }
+
+  if (test.texture) renderTextureView(body, test);
+  else if (test.buffer) renderBufferView(body, test);
+  else {
+    const note = document.createElement("div");
+    note.className = "empty";
+    note.textContent = test.status === "passed"
+      ? "Validation test passed — no CPU-side assertion failed."
+      : "Validation test — see the message above.";
+    body.appendChild(note);
+  }
+
+  if (!modal.open) modal.showModal();
+}
+
+document.getElementById("modal-close").onclick = () => modal.close();
+
+document.addEventListener("keydown", event => {
+  if (!modal.open) return;
+  if (event.key === "ArrowRight" && state.openIndex < state.filtered.length - 1) {
+    event.preventDefault();
+    openModal(state.openIndex + 1);
+  } else if (event.key === "ArrowLeft" && state.openIndex > 0) {
+    event.preventDefault();
+    openModal(state.openIndex - 1);
+  }
+});
+
+// --- Texture view -------------------------------------------------------------------------
+
+function renderTextureView(container, test) {
+  const texture = test.texture;
+  const failed = texture.meanError > texture.threshold;
+
+  const stats = document.createElement("div");
+  stats.className = "stats";
+  stats.innerHTML = `
+    <div><div class="stat-label">Size</div><div class="stat-value">${texture.width}×${texture.height}</div></div>
+    <div><div class="stat-label">FLIP mean</div>
+         <div class="stat-value ${failed ? "bad" : "good"}">${texture.meanError.toFixed(6)}</div></div>
+    <div><div class="stat-label">FLIP max</div><div class="stat-value">${texture.maxError.toFixed(6)}</div></div>
+    <div><div class="stat-label">Threshold</div><div class="stat-value">${texture.threshold.toFixed(6)}</div></div>
+    ${texture.hdr ? `<div><div class="stat-label">Range</div><div class="stat-value">HDR</div></div>` : ""}`;
+  container.appendChild(stats);
+
+  const sources = [
+    { key: "output", label: "Output", path: texture.output },
+    { key: "golden", label: "Golden", path: texture.golden },
+    { key: "flip", label: "FLIP (magma)", path: texture.flip },
+  ];
+
+  const triptych = document.createElement("div");
+  triptych.className = "triptych";
+  const views = {};
+  for (const source of sources) {
+    const cell = document.createElement("div");
+    cell.className = "shot";
+    cell.innerHTML = `<h3>${source.label}</h3>`;
+    const canvas = document.createElement("canvas");
+    canvas.width = texture.width;
+    canvas.height = texture.height;
+    cell.appendChild(canvas);
+    triptych.appendChild(cell);
+    views[source.key] = { canvas, path: source.path, pixels: null };
+  }
+  container.appendChild(triptych);
+
+  const magnifier = document.createElement("div");
+  magnifier.className = "magnifier idle";
+  magnifier.textContent = "Hover any image above to magnify a 10×10 region across all three.";
+  container.appendChild(magnifier);
+
+  // Decode each image once into its canvas, and keep the pixels for the magnifier + readout.
+  for (const source of sources) {
+    const view = views[source.key];
+    if (!view.path) continue;
+    const image = new Image();
+    image.onload = () => {
+      const context = view.canvas.getContext("2d", { willReadFrequently: true });
+      context.imageSmoothingEnabled = false;
+      context.drawImage(image, 0, 0, texture.width, texture.height);
+      view.pixels = context.getImageData(0, 0, texture.width, texture.height);
+    };
+    image.src = assetUrl(view.path);
+  }
+
+  buildMagnifier(magnifier, views, texture);
+}
+
+function buildMagnifier(magnifier, views, texture) {
+  const cells = {};
+  let built = false;
+
+  function build() {
+    magnifier.className = "magnifier";
+    magnifier.innerHTML = `
+      <div class="mag-grid">
+        ${["output", "golden", "flip"].map(key => `
+          <div class="mag-cell">
+            <h4>${key === "flip" ? "FLIP (magma)" : key[0].toUpperCase() + key.slice(1)}</h4>
+            <canvas data-key="${key}" width="${MAG_SIZE}" height="${MAG_SIZE}"></canvas>
+          </div>`).join("")}
+      </div>
+      <div class="readout" id="mag-readout"></div>`;
+    for (const canvas of magnifier.querySelectorAll("canvas")) {
+      cells[canvas.dataset.key] = canvas;
+    }
+    built = true;
+  }
+
+  function sample(pixels, x, y) {
+    if (!pixels || x < 0 || y < 0 || x >= pixels.width || y >= pixels.height) return null;
+    const offset = (y * pixels.width + x) * 4;
+    return [pixels.data[offset], pixels.data[offset + 1], pixels.data[offset + 2]];
+  }
+
+  function update(x, y) {
+    if (!built) build();
+
+    for (const key of Object.keys(cells)) {
+      const view = views[key];
+      const context = cells[key].getContext("2d");
+      context.imageSmoothingEnabled = false;
+      context.clearRect(0, 0, MAG_SIZE, MAG_SIZE);
+      if (!view.pixels) continue;
+      // Blit the source region 1:1 into the small canvas; CSS scales it up with pixelated
+      // rendering, so each texel stays a crisp square.
+      context.drawImage(view.canvas, x - MAG_RADIUS, y - MAG_RADIUS, MAG_SIZE, MAG_SIZE,
+                        0, 0, MAG_SIZE, MAG_SIZE);
+    }
+
+    const output = sample(views.output.pixels, x, y);
+    const golden = sample(views.golden.pixels, x, y);
+    const readout = magnifier.querySelector("#mag-readout");
+    const swatch = rgb => rgb
+      ? `<span class="swatch" style="background:rgb(${rgb.join(",")})"></span>${rgb.join(", ")}`
+      : "—";
+    const delta = output && golden
+      ? output.map((v, i) => Math.abs(v - golden[i])).join(", ")
+      : "—";
+    const maxDelta = output && golden
+      ? Math.max(...output.map((v, i) => Math.abs(v - golden[i])))
+      : 0;
+    readout.innerHTML = `
+      <span>px <b>${x}, ${y}</b></span>
+      <span>output <b>${swatch(output)}</b></span>
+      <span>golden <b>${swatch(golden)}</b></span>
+      <span>|Δ| <b style="color:${maxDelta > 0 ? "var(--fail)" : "var(--pass)"}">${delta}</b></span>`;
+  }
+
+  for (const view of Object.values(views)) {
+    view.canvas.addEventListener("mousemove", event => {
+      const rect = view.canvas.getBoundingClientRect();
+      const x = Math.floor((event.clientX - rect.left) / rect.width * texture.width);
+      const y = Math.floor((event.clientY - rect.top) / rect.height * texture.height);
+      update(x, y);
+    });
+  }
+}
+
+// --- Buffer view --------------------------------------------------------------------------
+
+const BYTES_PER_LINE = 16;
+
+function renderBufferView(container, test) {
+  const buffer = test.buffer;
+  const diffs = new Set((buffer.diffOffsets || []).map(Number));
+  const sortedDiffs = [...diffs].sort((a, b) => a - b);
+
+  const stats = document.createElement("div");
+  stats.className = "stats";
+  stats.innerHTML = `
+    <div><div class="stat-label">Size</div><div class="stat-value">${buffer.size} B</div></div>
+    <div><div class="stat-label">Golden size</div><div class="stat-value">${buffer.goldenSize || buffer.size} B</div></div>
+    <div><div class="stat-label">Differing bytes</div>
+         <div class="stat-value ${buffer.totalDiffCount ? "bad" : "good"}">${buffer.totalDiffCount || 0}</div></div>`;
+  container.appendChild(stats);
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "hex-toolbar";
+  toolbar.innerHTML = sortedDiffs.length
+    ? `<button class="chip" id="prev-diff">← Prev diff</button>
+       <button class="chip" id="next-diff">Next diff →</button>
+       <span class="meta" id="diff-position"></span>`
+    : `<span class="meta">Byte-identical to the golden.</span>`;
+  container.appendChild(toolbar);
+
+  const panes = document.createElement("div");
+  panes.className = "hex-panes";
+  panes.innerHTML = `
+    <div class="hex-pane"><h3>Output</h3><div class="hex-scroll" id="hex-output"></div></div>
+    <div class="hex-pane"><h3>Golden</h3><div class="hex-scroll" id="hex-golden"></div></div>`;
+  container.appendChild(panes);
+
+  // Fetch both blobs, then paint the two hex panes side by side.
+  Promise.all([
+    fetchBytes(assetUrl(buffer.output)),
+    fetchBytes(assetUrl(buffer.golden)),
+  ]).then(([output, golden]) => {
+    paintHex(document.getElementById("hex-output"), output, diffs);
+    paintHex(document.getElementById("hex-golden"), golden, diffs);
+    wireDiffNavigation(sortedDiffs);
+  }).catch(err => {
+    panes.innerHTML = `<div class="empty">Couldn't load the buffer artifacts (${escapeHtml(err.message)}).</div>`;
+  });
+}
+
+async function fetchBytes(url) {
+  if (!url) return null;
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+function paintHex(container, bytes, diffs) {
+  if (!bytes) {
+    container.innerHTML = `<div class="meta">Not available.</div>`;
+    return;
+  }
+
+  const lines = [];
+  for (let base = 0; base < bytes.length; base += BYTES_PER_LINE) {
+    const hexCells = [];
+    const asciiCells = [];
+    let lineHasDiff = false;
+
+    for (let i = 0; i < BYTES_PER_LINE; ++i) {
+      const offset = base + i;
+      if (offset >= bytes.length) {
+        hexCells.push(`<span class="hex-byte absent">··</span>`);
+        continue;
+      }
+      const isDiff = diffs.has(offset);
+      lineHasDiff = lineHasDiff || isDiff;
+      const byte = bytes[offset];
+      hexCells.push(`<span class="hex-byte${isDiff ? " diff" : ""}">${byte.toString(16).padStart(2, "0")}</span>`);
+      const printable = byte >= 0x20 && byte < 0x7f ? String.fromCharCode(byte) : ".";
+      asciiCells.push(isDiff ? `<span class="diff">${escapeHtml(printable)}</span>` : escapeHtml(printable));
+    }
+
+    lines.push(
+      `<div class="hex-line${lineHasDiff ? " has-diff" : ""}" data-offset="${base}">` +
+      `<span class="hex-off">${base.toString(16).padStart(8, "0")}</span>  ` +
+      hexCells.join(" ") +
+      `  <span class="hex-ascii">${asciiCells.join("")}</span></div>`);
+  }
+  container.innerHTML = lines.join("");
+}
+
+function wireDiffNavigation(sortedDiffs) {
+  if (sortedDiffs.length === 0) return;
+  let cursor = 0;
+
+  const position = document.getElementById("diff-position");
+  const jump = () => {
+    const offset = sortedDiffs[cursor];
+    const lineStart = Math.floor(offset / BYTES_PER_LINE) * BYTES_PER_LINE;
+    for (const paneId of ["hex-output", "hex-golden"]) {
+      const pane = document.getElementById(paneId);
+      const line = pane.querySelector(`.hex-line[data-offset="${lineStart}"]`);
+      if (!line) continue;
+      for (const focused of pane.querySelectorAll(".hex-line.focus")) focused.classList.remove("focus");
+      line.classList.add("focus");
+      pane.scrollTop = line.offsetTop - pane.clientHeight / 2;
+    }
+    position.textContent = `diff ${cursor + 1} of ${sortedDiffs.length} — offset 0x${offset.toString(16)}`;
+  };
+
+  document.getElementById("next-diff").onclick = () => {
+    cursor = (cursor + 1) % sortedDiffs.length;
+    jump();
+  };
+  document.getElementById("prev-diff").onclick = () => {
+    cursor = (cursor - 1 + sortedDiffs.length) % sortedDiffs.length;
+    jump();
+  };
+  jump();
+}
+
+load();
+</script>
+</body>
+</html>

@@ -8,7 +8,7 @@ add_rules("mode.debug", "mode.release", "mode.releasedbg")
 
 set_languages("cxx17")
 
-add_requires("libsdl3", "cgltf", "stb", "glm")
+add_requires("libsdl3", "cgltf", "stb", "glm", "nlohmann_json")
 add_requires("imgui v1.92.7-docking", { configs = { } })
 
 add_includedirs("src", "src/agfx", {public = true})

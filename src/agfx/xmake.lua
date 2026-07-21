@@ -46,6 +46,13 @@ target("agfx_demo")
     add_deps("agfx", "agfx_shader", "agfx_imgui")
     add_packages("libsdl3", "cgltf", "stb", "imgui", "glm", { public = true })
 
+target("agfx_tests")
+    set_kind("binary")
+    add_files("agfx_tests/**.cpp")
+
+    add_deps("agfx", "agfx_shader")
+    add_packages("stb", "nlohmann_json", "glm", { public = true })
+
 target("agfx_ez_demo")
     set_kind("binary")
     add_files("agfx_ez_demo/**.cpp")

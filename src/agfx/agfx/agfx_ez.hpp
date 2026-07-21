@@ -642,7 +642,9 @@ namespace agfx::ez
     {
         agfxDeviceCreateInfo deviceInfo{};
         agfx::Device* existingDevice = nullptr; // if set, Context does not own/destroy this device
-        void* windowHandle = nullptr;           // HWND on Windows, CAMetalLayer* on macOS
+        void* windowHandle = nullptr;           // HWND on Windows, CAMetalLayer* on macOS. If null, the
+                                                // Context is headless: no swap chain is created, and the
+                                                // back buffer / resize / HDR entry points are unavailable.
         uint32_t width = 0;
         uint32_t height = 0;
         bool vsync = true;
@@ -672,15 +674,19 @@ namespace agfx::ez
             mQueue = mDevice->CreateCommandQueue(AGFX_COMMAND_QUEUE_TYPE_GRAPHICS);
             mWindowHandle = info.windowHandle;
 
-            agfxSwapChainCreateInfo swapChainInfo{};
-            swapChainInfo.queue = mQueue;
-            swapChainInfo.imageCount = info.swapChainImageCount;
-            swapChainInfo.width = info.width;
-            swapChainInfo.height = info.height;
-            swapChainInfo.isHDR = info.hdr ? 1 : 0;
-            swapChainInfo.vsync = info.vsync ? 1 : 0;
-            swapChainInfo.handle = info.windowHandle;
-            mSwapChain = mDevice->CreateSwapChain(swapChainInfo);
+            mHeadless = (info.windowHandle == nullptr);
+
+            if (!mHeadless) {
+                agfxSwapChainCreateInfo swapChainInfo{};
+                swapChainInfo.queue = mQueue;
+                swapChainInfo.imageCount = info.swapChainImageCount;
+                swapChainInfo.width = info.width;
+                swapChainInfo.height = info.height;
+                swapChainInfo.isHDR = info.hdr ? 1 : 0;
+                swapChainInfo.vsync = info.vsync ? 1 : 0;
+                swapChainInfo.handle = info.windowHandle;
+                mSwapChain = mDevice->CreateSwapChain(swapChainInfo);
+            }
 
             mCommandBuffers.reserve(mFramesInFlight);
             mSlotFenceValues.assign(mFramesInFlight, 0);
@@ -721,8 +727,10 @@ namespace agfx::ez
 
             mDynamicConstants.BeginFrame(mFrameSlot);
 
-            mBackBufferTexture = mSwapChain.AcquireNextTexture();
-            agfxCommandBufferTextureBarrier(cmd.Get(), mBackBufferTexture, AGFX_RESOURCE_STATE_PRESENT, AGFX_RESOURCE_STATE_RENDER_TARGET, 0, 0, 0);
+            if (!mHeadless) {
+                mBackBufferTexture = mSwapChain.AcquireNextTexture();
+                agfxCommandBufferTextureBarrier(cmd.Get(), mBackBufferTexture, AGFX_RESOURCE_STATE_PRESENT, AGFX_RESOURCE_STATE_RENDER_TARGET, 0, 0, 0);
+            }
 
             return Frame(this);
         }
@@ -735,11 +743,15 @@ namespace agfx::ez
             mBackBufferRenderTarget.reset();
 
             agfx::CommandBuffer& cmd = mCommandBuffers[mFrameSlot];
-            agfxCommandBufferTextureBarrier(cmd.Get(), mBackBufferTexture, AGFX_RESOURCE_STATE_RENDER_TARGET, AGFX_RESOURCE_STATE_PRESENT, 0, 0, 0);
+            if (!mHeadless) {
+                agfxCommandBufferTextureBarrier(cmd.Get(), mBackBufferTexture, AGFX_RESOURCE_STATE_RENDER_TARGET, AGFX_RESOURCE_STATE_PRESENT, 0, 0, 0);
+            }
             cmd.End();
 
             mQueue.Submit(cmd);
-            mSwapChain.Present();
+            if (!mHeadless) {
+                mSwapChain.Present();
+            }
 
             ++mFenceValue;
             mQueue.Signal(mFrameFence, mFenceValue);
@@ -753,6 +765,7 @@ namespace agfx::ez
 
         void Resize(uint32_t width, uint32_t height)
         {
+            assert(!mHeadless && "Context::Resize() requires a swap chain (non-headless Context)");
             DrainGPU();
             mSwapChain.Resize(width, height);
             mWidth = width;
@@ -761,6 +774,7 @@ namespace agfx::ez
 
         void SetHDR(bool enabled, bool vsync)
         {
+            assert(!mHeadless && "Context::SetHDR() requires a swap chain (non-headless Context)");
             DrainGPU();
             agfxSwapChainCreateInfo info{};
             info.queue = mQueue;
@@ -826,6 +840,7 @@ namespace agfx::ez
 
         void SetBackBufferRenderTarget(agfxLoadOp loadOp = AGFX_LOAD_OPERATION_CLEAR, const float* clearColor = kDefaultClearColor)
         {
+            assert(!mHeadless && "Context::SetBackBufferRenderTarget() requires a swap chain (non-headless Context)");
             assert(mFrameActive);
             mActiveRenderPass.reset();
             mBackBufferRenderTarget.reset();
@@ -1085,7 +1100,15 @@ namespace agfx::ez
         agfx::Device& GetDevice() { return *mDevice; }
         agfx::CommandQueue& GetGraphicsQueue() { return mQueue; }
         agfx::CommandBuffer& GetCurrentCommandBuffer() { return mCommandBuffers[mFrameSlot]; }
-        agfxTextureFormat GetSwapChainFormat() const { return mSwapChain.GetFormat(); }
+        agfxTextureFormat GetSwapChainFormat() const
+        {
+            assert(!mHeadless && "Context::GetSwapChainFormat() requires a swap chain (non-headless Context)");
+            return mSwapChain.GetFormat();
+        }
+
+        /// @brief True when the Context was created without a windowHandle: no swap chain exists, and
+        /// the back buffer / resize / HDR entry points must not be called.
+        bool IsHeadless() const { return mHeadless; }
 
         // Block until all GPU work submitted so far has completed. Callers must drain before
         // destroying/replacing any resource that an in-flight command buffer may still reference
@@ -1194,6 +1217,7 @@ namespace agfx::ez
 
         agfx::CommandQueue mQueue;
         agfx::SwapChain mSwapChain;
+        bool mHeadless = false;
         void* mWindowHandle = nullptr;
         uint32_t mWidth = 0, mHeight = 0;
 

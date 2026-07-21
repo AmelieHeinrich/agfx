@@ -1,1 +1,108 @@
 # Lists of tests to do
+- [x] buffer view byte address
+- [ ] buffer view constant
+- [ ] buffer view rw byte address
+- [ ] buffer view rw structured
+- [ ] buffer view structured
+- [ ] compute buffer atomics
+- [ ] compute multi dispatch buffer
+- [ ] copy buffer to buffer
+- [ ] copy buffer to buffer offset
+- [ ] copy texture to buffer mip
+- [ ] copy texture to buffer
+- [ ] copy texture to buffer slice
+- [ ] upload readback roundtrip
+- [ ] compute multi dispatch texture
+- [ ] compute texture load 2D
+- [ ] compute texture load 2D array
+- [ ] compute texture load 3D
+- [ ] compute texture write
+- [ ] compute texture write 2D array
+- [ ] compute texture write 3D
+- [ ] copy buffer to texture mip
+- [ ] copy buffer to texture region
+- [ ] copy buffer to texture
+- [ ] copy buffer to texture slice
+- [ ] copy queue to render queue
+- [ ] compute queue to render queue
+- [ ] copy texture to texture
+- [ ] copy texture to texture mip
+- [ ] copy texture to texture slice
+- [ ] draw alpha blending (one for each blend test op/factor)
+- [x] draw triangle
+- [ ] draw ccw
+- [ ] draw cw
+- [ ] draw depth clamp
+- [ ] draw depth test (one for each depth test func)
+- [ ] draw fragment discard
+- [ ] draw indexed u16
+- [ ] draw indexed
+- [ ] draw lines
+- [ ] draw lines indexed
+- [ ] draw points
+- [ ] draw mesh shader
+- [ ] draw task + mesh shader
+- [ ] multiple draws with push constants
+- [ ] draw parameters (vertexOffset etc)
+- [ ] draw with push constants
+- [ ] scissor rect
+- [ ] viewport
+- [ ] draw wireframe
+- [ ] write to HDR texture
+- [ ] copy -> compute -> render queue
+- [ ] render pass clear face
+- [ ] render pass clear slice
+- [ ] render pass clear mip
+- [ ] render pass actions (one for each action combination except for store DONT_CARE since unsupported with D3D12)
+- [ ] sampler address mode (one for each sampler address mode)
+- [ ] sampler filter (one for each sampler filter)
+- [ ] sampler comparison (one for each comparison function)
+- [ ] sample 2D texture
+- [ ] sample 2D array texture
+- [ ] sample 3D texture
+- [ ] sample cube texture
+- [ ] draw indirect, one command
+- [ ] draw indexed indirect, one command
+- [ ] draw mesh indirect, one command
+- [ ] draw mesh tasks indirect, one command
+- [ ] draw indirect, 3 commands + drawID
+- [ ] draw indexed indirect, 3 commands + drawID
+- [ ] draw mesh indirect, 3 commands + drawID
+- [ ] draw mesh tasks indirect, 3 commands + drawID
+- [ ] dispatch indirect
+- [ ] sample depth texture (d32->r32)
+- [ ] texture view format reinterpretation
+- [ ] copy texture region
+- [ ] UAV barriers
+- [ ] MRT (render to 2 different color attachments then add their contents up in the output texture using compute)
+- [ ] render to texture slice
+- [ ] render to texture face
+- [ ] render to texture mip
+- [ ] depth write disabled
+- [ ] pipeline cull mode
+- [ ] compute shared memory
+- [ ] compute wave ops
+- [ ] texture gather
+- [ ] texture view handle not null
+- [ ] buffer view handle not null
+- [x] sampler handle not null
+- [ ] tlas address not null
+- [ ] rt: trace against blas one triangle geometry
+- [ ] rt: trace against blas multiple triangle geometry
+- [ ] rt: trace against blas one aabb geometry
+- [ ] rt: trace against blas multiple aabb geometry
+- [ ] rt: trace against blas mixed triangle and aabb geometry
+- [ ] rt: update blas
+- [ ] rt: compact blas
+- [ ] rt: tlas with one instance
+- [ ] rt: tlas with multiple instances
+- [ ] rt: blas/tlas opacity
+- [ ] rt: blas reuse in tlas instances
+- [ ] rt: scratch buffer reuse
+- [ ] rt: build with offset scratch buffer
+- [ ] rt: copy AS
+- [ ] rt: ray barycentrics
+- [ ] rt: ray primID
+- [ ] rt: ray userID
+- [ ] rt: ray hit kind
+- [ ] rt: discard ray on alpha

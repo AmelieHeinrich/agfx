@@ -6,3 +6,5 @@ compile_commands.json
 imgui.ini
 .DS_Store
 notes
+test_results
+test_results_fail
