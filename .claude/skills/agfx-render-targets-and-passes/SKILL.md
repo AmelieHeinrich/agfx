@@ -25,6 +25,8 @@ Render targets are intentionally lightweight: create one right before `agfxRende
 - Swap chain back buffer acquisition/present, HDR toggling → `agfx-presentation-and-swapchain`
 - Resource state barrier semantics, agglomeration, fences, frame pacing → `agfx-synchronization`
 - Compute/copy passes (`agfxComputePass*`) — those are a separate pass type for compute dispatch and copies, not covered here
+- GPU-driven replay inside a pass (`agfxRenderPassExecuteIndirectBundle`) and everything feeding it → `agfx-mdi`; the pass setup around it is ordinary and covered here, but the bundle itself, its barriers, and the `supportsIndirect` pipeline flag are not
+- Mesh-shader pipeline setup behind `agfxRenderPassDrawMesh` (`meshShader`/`taskShader`, the reflected group sizes) → `agfx-writing-bindless-shaders`
 
 ## References
 

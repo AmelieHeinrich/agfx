@@ -50,7 +50,7 @@ The library also ships a C++17 header `agfx.hpp` with RAII, and agfx_ez.hpp, a l
 In this repository you can find a few different folders:
 - .claude : a porting agent and claude skills to facilitate porting your game to AGFX
 - agfx: The main library
-- agfx_demo: A self-contained demo using SDL3 and AGFX with physically based rendering, cascaded shadow maps, SSAO, HDR
+- agfx_demo: A self-contained demo using SDL3 and AGFX with physically based rendering, cascaded shadow maps, SSAO, HDR, raytraced mirror reflections, GPU driven frustum culling
 - agfx_ez_demo: Simple self-contained demo showcasing agfx_ez.hpp
 - agfx_imgui: ImGui backend for AGFX
 - agfx_shader: Simple shader compiler library to go from HLSL -> AGFX bytecode

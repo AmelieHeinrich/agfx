@@ -1,6 +1,6 @@
 ---
 name: agfx-porting-from-d3d11
-description: ALWAYS use when porting an existing D3D11 engine or renderer to AGFX — translating ID3D11Device/DeviceContext/InputLayout/state-object code to agfxDevice/agfxCommandBuffer/agfxRenderPipeline calls, converting HLSL from D3D11's `register(t/b/u/s)` immediate-context binding model to AGFX bindless, or mapping D3D11 concepts (immediate/deferred context, input layouts, state objects, swap chain) onto their AGFX equivalents. Trigger on ID3D11*, D3D11_*, HRESULT device/context calls, VSSetShaderResources/PSSetConstantBuffers/IASetInputLayout, CreateBlendState/CreateRasterizerState/CreateDepthStencilState, "port to AGFX", "port from D3D11". Do NOT trigger for D3D12 sources — use agfx-porting-from-d3d12. Do NOT trigger for AGFX-native questions with no D3D11 source code involved — use the specific agfx-* skill for that subsystem instead (agfx-presentation-and-swapchain, agfx-render-targets-and-passes, agfx-synchronization, agfx-writing-bindless-shaders).
+description: ALWAYS use when porting an existing D3D11 engine or renderer to AGFX — translating ID3D11Device/DeviceContext/InputLayout/state-object code to agfxDevice/agfxCommandBuffer/agfxRenderPipeline calls, converting HLSL from D3D11's `register(t/b/u/s)` immediate-context binding model to AGFX bindless, or mapping D3D11 concepts (immediate/deferred context, input layouts, state objects, swap chain) onto their AGFX equivalents. Trigger on ID3D11*, D3D11_*, HRESULT device/context calls, VSSetShaderResources/PSSetConstantBuffers/IASetInputLayout, CreateBlendState/CreateRasterizerState/CreateDepthStencilState, "port to AGFX", "port from D3D11". Do NOT trigger for D3D12 sources — use agfx-porting-from-d3d12. Do NOT trigger for AGFX-native questions with no D3D11 source code involved — use the specific agfx-* skill for that subsystem instead (agfx-presentation-and-swapchain, agfx-render-targets-and-passes, agfx-synchronization, agfx-writing-bindless-shaders, agfx-raytracing, agfx-mdi).
 ---
 
 # Porting a D3D11 Engine to AGFX
@@ -61,7 +61,27 @@ This is a bigger conceptual gap than porting from D3D12 or Vulkan (both of which
 4. **Resources.** Port `ID3D11Buffer`/`ID3D11Texture2D` creation to `agfxBufferCreate`/`agfxTextureCreate` (or `agfx::ez::Context::CreateVertexBuffer`/`CreateTexture2D` etc.). Drop `Map`/`Unmap`-per-frame dynamic-buffer patterns in favor of AGFX's ring-buffered constants if using ez, or a hand-rolled equivalent if using raw AGFX.
 5. **One render pass end-to-end.** Convert one `OMSetRenderTargets` + draw sequence to an `agfxRenderPassBegin`/draw/`End` (`agfx-render-targets-and-passes`), including the barriers D3D11 never required (`agfx-synchronization`, or `agfx::ez::Context::TransitionTexture`/`SetRenderTargets`, which tracks this automatically for ez-created resources).
 6. **Shaders.** Rewrite each HLSL shader's binding section: remove `register(tN/bN/sN)` slot declarations, replace with `AGFX_PUSH_CONSTANTS` + `ResourceHandle` fields and `AGFXTexture2D`/`AGFXStructuredBuffer`/`AGFXSampler::Create(handle)` calls, replace input-layout vertex fetch with vertex pulling from `SV_VertexID` (`agfx-writing-bindless-shaders`). A shader rewritten without its host-side push-constant struct updated in the same pass won't compile — do these together.
-7. **Remaining passes**, then **cross-cutting** concerns: any stencil-dependent logic (unsupported — flag to the user), MSAA (check current AGFX support before assuming it maps), HDR/resize (`agfx-presentation-and-swapchain`).
+7. **Remaining passes**, then **cross-cutting** concerns: any stencil-dependent logic (unsupported — flag to the user), MSAA (check current AGFX support before assuming it maps), HDR/resize (`agfx-presentation-and-swapchain`). AGFX also offers mesh shaders, inline ray tracing, and multi-draw indirect, none of which D3D11 has — see "Advanced features" below if the port is also a modernization.
+
+## Advanced features: mesh shaders, ray tracing, GPU-driven draws
+
+All three are supported as of **AGFX v1.2.0** (ray tracing landed in v1.1.0, multi-draw indirect in v1.2.0). Each is capability-gated — query once and keep the fallback path alive, since none are universal (Apple silicon needs M3+ for ray tracing and mesh shaders):
+
+```cpp
+agfxDeviceInfo info = {};
+agfxDeviceGetInfo(device, &info);
+// info.supportsRayTracing / info.supportsMeshShaders / info.supportsMultiDrawIndirect
+```
+
+| D3D11 | AGFX | Notes |
+|---|---|---|
+| `DrawInstancedIndirect` / `DrawIndexedInstancedIndirect` | `agfxIndirectBundle` + `PrepareIndirectBundle`/`ExecuteIndirectBundle` | D3D11's is a *single* indirect draw from a fixed buffer; AGFX's is multi-draw with a GPU-written count, so this is an upgrade, not a 1:1 port — a D3D11 engine looping single indirect draws should collapse that loop into one bundle |
+| *(no D3D11 equivalent)* | mesh shaders (`agfxRenderPassDrawMesh`) | new capability; nothing to translate |
+| *(no D3D11 equivalent)* | inline ray tracing (`RayQuery`) | new capability; D3D11 has no DXR |
+
+**The one structural mismatch to flag early:** AGFX supports **inline ray tracing only** — `RayQuery`/`TraceRayInline` from a compute shader. There is no ray-generation/any-hit/closest-hit pipeline, no hit groups, and no shader binding table. A source engine built around a ray-tracing *pipeline* needs those passes restructured into compute dispatches that trace inline and shade at the hit point themselves; that is a redesign, not a translation, and is worth surfacing to the user before starting.
+
+Delegate the actual work: **agfx-raytracing** (acceleration structures, inline tracing), **agfx-mdi** (indirect bundles, GPU culling), **agfx-writing-bindless-shaders** (`main_ms`/`main_as` entry points, reflected group sizes) with **agfx-render-targets-and-passes** for `agfxRenderPassDrawMesh`.
 
 ## Common Porting Pitfalls
 

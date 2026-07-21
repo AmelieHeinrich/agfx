@@ -1,6 +1,6 @@
 ---
 name: agfx-porting-from-metal
-description: ALWAYS use when porting an existing Metal (Metal 3 or Metal 4) engine or renderer to AGFX — translating MTLDevice/MTLCommandBuffer/MTLRenderPipelineState/MTLArgumentEncoder code to agfxDevice/agfxCommandBuffer/agfxRenderPipeline calls, converting Metal Shading Language (MSL) argument-buffer/bindless shaders to AGFX's HLSL bindless model, or mapping Metal concepts (command queues/buffers/encoders, MTLFence/MTLEvent, MTLResourceUsage/useResource residency, CAMetalLayer) onto their AGFX equivalents. Trigger on MTLDevice/MTLCommandBuffer/MTLRenderCommandEncoder/MTLComputeCommandEncoder/MTLRenderPipelineState, id<MTLTexture>/id<MTLBuffer>, MTLArgumentEncoder, CAMetalLayer, "port to AGFX", "port from Metal". Do NOT trigger for porting a non-Metal engine to raw Metal (that's game-porting-skills, not AGFX). Do NOT trigger for AGFX-native questions with no Metal source code involved — use the specific agfx-* skill for that subsystem instead (agfx-presentation-and-swapchain, agfx-render-targets-and-passes, agfx-synchronization, agfx-writing-bindless-shaders).
+description: ALWAYS use when porting an existing Metal (Metal 3 or Metal 4) engine or renderer to AGFX — translating MTLDevice/MTLCommandBuffer/MTLRenderPipelineState/MTLArgumentEncoder code to agfxDevice/agfxCommandBuffer/agfxRenderPipeline calls, converting Metal Shading Language (MSL) argument-buffer/bindless shaders to AGFX's HLSL bindless model, or mapping Metal concepts (command queues/buffers/encoders, MTLFence/MTLEvent, MTLResourceUsage/useResource residency, CAMetalLayer) onto their AGFX equivalents. Trigger on MTLDevice/MTLCommandBuffer/MTLRenderCommandEncoder/MTLComputeCommandEncoder/MTLRenderPipelineState, id<MTLTexture>/id<MTLBuffer>, MTLArgumentEncoder, CAMetalLayer, "port to AGFX", "port from Metal". Do NOT trigger for porting a non-Metal engine to raw Metal (that's game-porting-skills, not AGFX). Do NOT trigger for AGFX-native questions with no Metal source code involved — use the specific agfx-* skill for that subsystem instead (agfx-presentation-and-swapchain, agfx-render-targets-and-passes, agfx-synchronization, agfx-writing-bindless-shaders, agfx-raytracing, agfx-mdi).
 ---
 
 # Porting a Metal Engine to AGFX
@@ -65,7 +65,28 @@ Because Metal and AGFX's Metal 4 backend already share deep structural similarit
 4. **Resources.** Port `newTextureWithDescriptor:`/`newBufferWithLength:options:` to `agfxTextureCreate`/`agfxBufferCreate`. If the source manages its own argument-buffer-backed bindless heap, this step also means retiring that in favor of AGFX's built-in one — keep the returned `ResourceHandle`s, drop the custom heap bookkeeping.
 5. **One render pass end-to-end.** Convert one `MTLRenderPassDescriptor` + encoder sequence to `agfxRenderPassBegin`/draw/`End` (`agfx-render-targets-and-passes`), with barriers into the right states beforehand (`agfx-synchronization`) — this is where binding-model mistakes surface fastest.
 6. **Shaders.** Rewrite each `.metal` shader to HLSL: remove `[[texture(n)]]`/`[[buffer(n)]]` attributes and any classic-binding assumptions, replace with `AGFX_PUSH_CONSTANTS` + `ResourceHandle` fields and `AGFXTexture2D`/`AGFXStructuredBuffer`/`AGFXSampler::Create(handle)` calls; if the source already does manual vertex pulling in MSL, port that logic directly rather than reinventing it (`agfx-writing-bindless-shaders`). Port a shader and its host-side push-constant struct together.
-7. **Remaining passes**, then **cross-cutting**: stencil-dependent logic (unsupported, flag it), MetalFX upscaling/frame interpolation (no AGFX equivalent — flag as a feature the port drops or needs a separate integration), HDR/resize (`agfx-presentation-and-swapchain`).
+7. **Remaining passes**, then **cross-cutting**: stencil-dependent logic (unsupported, flag it), MetalFX upscaling/frame interpolation (no AGFX equivalent — flag as a feature the port drops or needs a separate integration), HDR/resize (`agfx-presentation-and-swapchain`). Mesh shaders, ray tracing, and indirect command buffers all have AGFX equivalents — see "Advanced features" below.
+
+## Advanced features: mesh shaders, ray tracing, GPU-driven draws
+
+All three are supported as of **AGFX v1.2.0** (ray tracing landed in v1.1.0, multi-draw indirect in v1.2.0). Each is capability-gated — query once and keep the fallback path alive, since none are universal (Apple silicon needs M3+ for ray tracing and mesh shaders):
+
+```cpp
+agfxDeviceInfo info = {};
+agfxDeviceGetInfo(device, &info);
+// info.supportsRayTracing / info.supportsMeshShaders / info.supportsMultiDrawIndirect
+```
+
+| Metal | AGFX | Notes |
+|---|---|---|
+| `drawMeshThreadgroups:threadsPerObjectThreadgroup:threadsPerMeshThreadgroup:` | `agfxRenderPassDrawMesh` | AGFX takes the threadgroup sizes from the pipeline (`meshGroupSizeX/Y/Z`, `taskGroupSizeX/Y/Z`), not the draw call |
+| `MTLAccelerationStructure` + acceleration-structure encoder builds | `agfxAccelerationStructureCreate` + `agfxComputePassBuildAccelerationStructure` | AGFX builds inside a compute pass on both backends |
+| `intersection_query` in MSL | `RayQuery` in HLSL | direct equivalent — Metal's inline model is the one AGFX exposes |
+| `MTLIndirectCommandBuffer` + `executeCommandsInBuffer:` + a GPU encoding kernel | `agfxIndirectBundle` + `PrepareIndirectBundle`/`ExecuteIndirectBundle` | **AGFX already owns the ICB and its encoding kernel.** Delete the engine's hand-rolled ICB encoding; write D3D12-shaped commands via the `AGFXIndirectDraw*Bundle` HLSL helpers and let `PrepareIndirectBundle` build the ICB |
+
+**The one structural mismatch to flag early:** AGFX supports **inline ray tracing only** — `RayQuery`/`TraceRayInline` from a compute shader. There is no ray-generation/any-hit/closest-hit pipeline, no hit groups, and no shader binding table. A source engine built around a ray-tracing *pipeline* needs those passes restructured into compute dispatches that trace inline and shade at the hit point themselves; that is a redesign, not a translation, and is worth surfacing to the user before starting.
+
+Delegate the actual work: **agfx-raytracing** (acceleration structures, inline tracing), **agfx-mdi** (indirect bundles, GPU culling), **agfx-writing-bindless-shaders** (`main_ms`/`main_as` entry points, reflected group sizes) with **agfx-render-targets-and-passes** for `agfxRenderPassDrawMesh`.
 
 ## Common Porting Pitfalls
 

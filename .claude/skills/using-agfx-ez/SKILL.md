@@ -1,6 +1,6 @@
 ---
 name: using-agfx-ez
-description: ALWAYS use when writing or modifying code against agfx::ez (agfx_ez.hpp) — the D3D11/OpenGL-style immediate-context convenience layer built on top of raw AGFX. Trigger on agfx::ez::Context, agfx::ez::Texture2D, agfx::ez::Buffer, agfx::ez::ShaderBindings, agfx::ez::PipelineDesc, Context::BeginFrame/EndFrame, Context::SetRenderTargets/SetPipeline/Draw, Context::CreateTexture2D/CreateVertexBuffer/CreateStructuredBuffer, Context::AllocateConstants, Context::TransitionTexture/TransitionBuffer, "agfx ez", "immediate mode AGFX", "simple AGFX API", or a decision about whether a new AGFX-based tool/prototype/small app should use raw AGFX or the ez layer. Do NOT trigger for raw agfx.h/agfx.hpp API usage with no agfx_ez.hpp involvement — use the relevant agfx-* subsystem skill instead (agfx-presentation-and-swapchain, agfx-render-targets-and-passes, agfx-synchronization, agfx-writing-bindless-shaders). Do NOT trigger for porting an existing engine from another graphics API — use the relevant agfx-porting-from-* skill, which will itself decide whether to recommend ez.
+description: ALWAYS use when writing or modifying code against agfx::ez (agfx_ez.hpp) — the D3D11/OpenGL-style immediate-context convenience layer built on top of raw AGFX. Trigger on agfx::ez::Context, agfx::ez::Texture2D, agfx::ez::Buffer, agfx::ez::ShaderBindings, agfx::ez::PipelineDesc, Context::BeginFrame/EndFrame, Context::SetRenderTargets/SetPipeline/Draw, Context::CreateTexture2D/CreateVertexBuffer/CreateStructuredBuffer, Context::AllocateConstants, Context::TransitionTexture/TransitionBuffer/TransitionIndirectBundle, Context::CreateIndirectBundle/ExecuteIndirectBundle, agfx::ez::IndirectBundle, agfx::ez::AccelerationStructure, "agfx ez", "immediate mode AGFX", "simple AGFX API", or a decision about whether a new AGFX-based tool/prototype/small app should use raw AGFX or the ez layer. Do NOT trigger for raw agfx.h/agfx.hpp API usage with no agfx_ez.hpp involvement — use the relevant agfx-* subsystem skill instead (agfx-presentation-and-swapchain, agfx-render-targets-and-passes, agfx-synchronization, agfx-writing-bindless-shaders, agfx-mdi, agfx-raytracing). Do NOT trigger for porting an existing engine from another graphics API — use the relevant agfx-porting-from-* skill, which will itself decide whether to recommend ez.
 ---
 
 # Using agfx::ez
@@ -18,12 +18,15 @@ description: ALWAYS use when writing or modifying code against agfx::ez (agfx_ez
 - `agfx::ez::Texture2D`/`agfx::ez::Buffer`: lazily-created cached views (SRV/UAV/RTV, and per-`agfxBufferViewType` views respectively) and their state tracker
 - `agfx::ez::ShaderBindings`: the 128-byte push-constant builder and its `BindTexture`/`BindBuffer`/`BindSampler`/`Write` calls
 - `agfx::ez::PipelineDesc` + the internal pipeline cache: the simplified render-pipeline description and when a new `agfx::RenderPipeline` gets built vs. reused
+- `agfx::ez::IndirectBundle`/`AccelerationStructure` **as ez objects**: their state tracking, `Context::CreateIndirectBundle`/`ExecuteIndirectBundle`/`TransitionIndirectBundle`, and the raw-compute-pass escape hatch they require
 - The explicit scope limits of ez's barrier tracking (see Overview) — when to reach for raw AGFX barriers instead
 - When to recommend `agfx::ez` over raw AGFX for a new tool/prototype, and the reverse (when an existing ez-based app has outgrown it)
 
 **Doesn't own:**
 - Raw AGFX API detail for calls ez wraps — the four `agfx-*` subsystem skills own the underlying `agfxRenderPassBegin`/`agfxCommandBufferTextureBarrier`/etc. semantics that `Context` methods are thin sugar over
 - HLSL shader authoring itself (`AGFX_PUSH_CONSTANTS`, `AGFXTexture2D`, etc.) — `agfx-writing-bindless-shaders`; ez's `ShaderBindings` only builds the *host-side* constant blob, it doesn't change what the shader itself looks like
+- GPU-driven submission semantics themselves (bundle layout, prepare/execute ordering, `supportsIndirect`, the HLSL append helpers) — **agfx-mdi**; ez only sugars bundle creation, the lockstep transition, and the replay call
+- Acceleration-structure build semantics — **agfx-raytracing**; ez only sugars the one-call synchronous build
 - Deciding whether a *port* from another API should target ez or raw AGFX — each `agfx-porting-from-*` skill makes that call itself and links back here for the mechanics once decided
 
 ## References
@@ -142,6 +145,32 @@ bindings.BindBuffer(cbView);
 
 `AllocateConstants` hands back a view into a ring buffer sized by `dynamicConstantsBudgetPerFrame` (default 4 MiB) and rotated per frame-in-flight slot — safe to call freely within a frame for per-draw/per-pass constant data, but the returned view is only valid for the current frame (the slot gets reused once `BeginFrame` wraps back around after `framesInFlight` frames). Don't hold onto a returned `agfx::BufferView&` past `EndFrame`.
 
+### GPU-driven draws (indirect bundles)
+
+```cpp
+ez::IndirectBundle bundle = ctx.CreateIndirectBundle(AGFX_INDIRECT_BUNDLE_TYPE_DRAW_INDEXED, maxDraws);
+
+// Cull + prepare on a raw compute pass -- ez has no compute-pass sugar, by design.
+ctx.EndActivePass();
+ctx.TransitionIndirectBundle(bundle, AGFX_RESOURCE_STATE_UNORDERED_ACCESS);
+{
+    agfx::ComputePass pass = ctx.GetCurrentCommandBuffer().BeginComputePass("Culling");
+    // ... dispatch the culling shader with bundle.GetHandle() in its push constants ...
+    pass.BufferUAVBarrier(bundle.Raw().CommandsBuffer());
+    pass.BufferUAVBarrier(bundle.Raw().CountBuffer());
+    pass.PrepareIndirectBundle(bundle.Raw(), prepareInfo);
+}
+ctx.TransitionIndirectBundle(bundle, AGFX_RESOURCE_STATE_INDIRECT_ARGUMENT);
+
+ctx.SetBackBufferRenderTarget();
+ctx.SetPipeline(desc);                     // desc.supportsIndirect must be true
+ctx.ExecuteIndirectBundle(bundle, executeInfo);
+```
+
+`TransitionIndirectBundle` moves the commands and count buffers together — they always transition in lockstep, so the bundle carries a single shared state tracker — and no-ops when already in the target state. `Context::ExecuteIndirectBundle` asserts an active render pass and handles DRAW/DRAW_INDEXED/DRAW_MESH bundles; **DISPATCH bundles have no ez wrapper** and go through `agfx::ComputePass::ExecuteIndirectBundle` on a raw compute pass, same as prepare.
+
+Two requirements ez cannot check for you, both silent-on-D3D12 / fatal-on-Metal: the pipeline needs `supportsIndirect`, and `pushConstants` must be filled on the *prepare* info as well as the execute info. See **agfx-mdi** for both, and for the bundle layout and ordering rules this sugar sits on top of.
+
 ### Explicit transitions (the escape hatch)
 
 ```cpp
@@ -176,4 +205,5 @@ Use these when a specific piece of code needs raw AGFX control (custom barrier s
 - **Calling `SetPipeline` before `SetRenderTargets`/`SetBackBufferRenderTarget`.** The pipeline cache key depends on the currently bound attachment formats — this ordering isn't optional.
 - **Assuming `TransitionTexture`/`SetRenderTargets` tracking covers UAV read/write hazards within a compute pass.** It doesn't — use the re-exposed `TextureUAVBarrier`/`BufferUAVBarrier` on the raw `agfx::ComputePass` for that (see `agfx-synchronization`), same requirement as raw AGFX.
 - **Reaching for ez on a codebase that needs per-attachment blend state, or manual multi-command-buffer scheduling.** `PipelineDesc` and `Context`'s single-command-buffer-per-frame-slot model don't cover these — use raw AGFX instead (or ez for the parts that fit, raw AGFX for the parts that don't, via the escape hatches above). Mesh shading is covered by ez (`PipelineDesc::meshShader`/`taskShader`, `Context::DrawMesh`).
+- **Assuming `ctx.ExecuteIndirectBundle` is the whole indirect story.** It is only the replay call. Creating the bundle, resetting the count slot, culling, preparing, and the surrounding transitions are all on you — and a bundle shared across frames in flight needs a write-after-read barrier before each rebuild. See **agfx-mdi**.
 - **Setting both `vertexShader` and `meshShader` on a `PipelineDesc` (or neither).** Exactly one must be set — `SetPipeline` asserts otherwise.

@@ -7,7 +7,7 @@ description: ALWAYS use when writing or modifying HLSL shaders for AGFX, or wiri
 
 ## Overview
 
-AGFX shaders are HLSL, compiled with DXC to DXIL (SM 6.6) and then, on macOS, translated to Metal IR via the Metal shader converter (`agfx_shader/agfx_shader_compiler_mac.mm`) using `IRRootSignatureFlagSamplerHeapDirectlyIndexed | IRRootSignatureFlagCBVSRVUAVHeapDirectlyIndexed` — i.e. **fully bindless, direct-indexed heaps**. There is no per-draw descriptor table, no `register(t0, space0)` binding model, and no `Bind*` API on the C side beyond push constants. Every resource a shader touches — textures, buffers, samplers — is accessed by a `ResourceHandle` (a plain `uint` index) pulled out of `ResourceDescriptorHeap`/`SamplerDescriptorHeap` and wrapped in one of the `AGFX*` helper classes declared in `data/shaders/<project>/agfx.h`.
+AGFX shaders are HLSL, compiled with DXC to DXIL (SM 6.6) and then, on macOS, translated to Metal IR via the Metal shader converter (`agfx_shader/agfx_shader_compiler_mac.mm`) using `IRRootSignatureFlagSamplerHeapDirectlyIndexed | IRRootSignatureFlagCBVSRVUAVHeapDirectlyIndexed` — i.e. **fully bindless, direct-indexed heaps**. There is no per-draw descriptor table, no `register(t0, space0)` binding model, and no `Bind*` API on the C side beyond push constants. Every resource a shader touches — textures, buffers, samplers — is accessed by a `ResourceHandle` (a plain `uint` index) pulled out of `ResourceDescriptorHeap`/`SamplerDescriptorHeap` and wrapped in one of the `AGFX*` helper classes declared in `data/shaders/agfx.h`.
 
 The host side hands shaders these handles two ways: almost always via push constants (`agfxRenderPassPushConstants`/`agfxComputePassPushConstants`, bound at `register(b0)`), or, for structured scene/per-draw constant data, by putting the handle to a constant buffer *inside* the push constants and loading it as an `AGFXStructuredBuffer` in the shader (see `sceneCB` pattern below) rather than a second root CBV.
 
@@ -15,7 +15,7 @@ The host side hands shaders these handles two ways: almost always via push const
 
 **Owns:**
 - The bindless resource-access pattern: `ResourceHandle`, `AGFXTexture1D/2D/2DArray/3D/Cube<T>`, `AGFXRWTexture1D/2D/3D<T>`, `AGFXStructuredBuffer<T>`/`AGFXRWStructuredBuffer<T>`, `AGFXByteAddressBuffer`/`AGFXRWByteAddressBuffer`, `AGFXSampler`/`AGFXComparisonSampler`, `AGFXRaytracingAccelerationStructure`
-- Push constants: `AGFX_PUSH_CONSTANTS(type, name)` at `register(b0)`, and the optional per-draw ID at `register(b1)` (`AGFX_DECLARE_DRAW_ID()`/`AGFX_DRAW_ID()`)
+- Push constants: `AGFX_PUSH_CONSTANTS(type, name)` at `register(b0)`, and the optional per-draw ID at `register(b1)` (`AGFX_DECLARE_DRAW_ID()`/`AGFX_DRAW_ID()`), which is how a shader replayed from an indirect bundle recovers which draw it is
 - Entry point / stage conventions (`main_vs`, `main_ps`, `main_cs`, `main_ms`, `main_as`) and matching `agfxShaderModuleType`
 - `agfxShaderCompilerOptions`/`agfxShaderCompilerResult` and `agfxCompileShader` — the HLSL → DXIL → (macOS) Metal IR pipeline
 - Wiring compiled `agfxShaderModule`s into `agfxRenderPipelineCreateInfo`/`agfxComputePipelineCreateInfo`
@@ -23,18 +23,19 @@ The host side hands shaders these handles two ways: almost always via push const
 **Doesn't own:**
 - Render pass/attachment setup the pipeline is later bound and drawn within → `agfx-render-targets-and-passes`
 - Barriers needed before a shader can safely read/write a resource (state transitions, UAV hazard barriers) → `agfx-synchronization`
+- The `AGFXIndirectDraw*Bundle` append helpers declared in the same header (`Create`/`Draw`/`DrawIndexed`/`DrawMesh`/`Dispatch`) and the GPU-driven submission model around them → `agfx-mdi`
 - Swap chain / back buffer acquisition → `agfx-presentation-and-swapchain`
 
 ## References
 
-The bindless helper header lives per-project at `data/shaders/<project>/agfx.h` (e.g. `data/shaders/demo/agfx.h`, `data/shaders/game/agfx.h`) — **always `#include` it first** in a new shader and read it before inventing a new resource-access pattern; it is the complete list of what's available. Real shader examples: `data/shaders/demo/gbuffer.hlsl` (vertex+fragment, structured vertex pulling, textures+sampler), `data/shaders/demo/ssao.hlsl` (compute, RW texture output, scene CB), `data/shaders/demo/mipgen.hlsl` (minimal compute), `data/shaders/demo/deferred_lighting.hlsl`, `data/shaders/demo/shadow_depth.hlsl`, `data/shaders/demo/tonemap.hlsl`, `data/shaders/demo/imgui.hlsl`. Host-side compile+load pattern: `agfx_demo/deferred_renderer.cpp`'s `CompileShader` helper, `agfx_demo/ssao.cpp`, `agfx_demo/agfx_mipgen.cpp`. Compiler internals: `agfx_shader/agfx_shader_compiler.h` and `agfx_shader/agfx_shader_compiler_mac.mm`.
+The bindless helper header is a single shared file at `data/shaders/agfx.h`, included by every shader in the repo as `#include "data/shaders/agfx.h"` (a repo-root-relative path, not relative to the including shader) — **always `#include` it first** in a new shader and read it before inventing a new resource-access pattern; it is the complete list of what's available. Real shader examples: `data/shaders/demo/gbuffer.hlsl` (vertex+fragment, structured vertex pulling, textures+sampler), `data/shaders/demo/ssao.hlsl` (compute, RW texture output, scene CB), `data/shaders/demo/mipgen.hlsl` (minimal compute), `data/shaders/demo/deferred_lighting.hlsl`, `data/shaders/demo/shadow_depth.hlsl`, `data/shaders/demo/tonemap.hlsl`, `data/shaders/demo/imgui.hlsl`. Host-side compile+load pattern: `agfx_demo/deferred_renderer.cpp`'s `CompileShader` helper, `agfx_demo/ssao.cpp`, `agfx_demo/agfx_mipgen.cpp`. Compiler internals: `agfx_shader/agfx_shader_compiler.h` and `agfx_shader/agfx_shader_compiler_mac.mm`.
 
 ## Design Patterns
 
 ### Minimal shader skeleton
 
 ```hlsl
-#include "data/shaders/demo/agfx.h"   // path is project-relative; match the project's existing shaders
+#include "data/shaders/agfx.h"   // one shared header for all shaders; path is repo-root-relative
 
 struct MyPushConstants {
     ResourceHandle someTex;

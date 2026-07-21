@@ -1,6 +1,6 @@
 ---
 name: agfx-porting-from-vulkan
-description: ALWAYS use when porting an existing Vulkan engine or renderer to AGFX — translating VkDevice/VkCommandBuffer/VkPipeline/VkDescriptorSet/VkRenderPass code to agfxDevice/agfxCommandBuffer/agfxRenderPipeline calls, converting GLSL/HLSL from Vulkan's descriptor-set binding model (or VK_EXT_descriptor_buffer/bindless) to AGFX bindless HLSL, or mapping Vulkan concepts (descriptor sets/pools/layouts, image layouts, pipeline barriers, render passes/dynamic rendering, timeline semaphores) onto their AGFX equivalents. Trigger on VkDevice/VkCommandBuffer/VkImage/VkBuffer/VkPipeline/VkDescriptorSet*, vkCmdPipelineBarrier, VkImageLayout, vkQueueSubmit, VkRenderPass/vkCmdBeginRendering, "port to AGFX", "port from Vulkan". Do NOT trigger for AGFX-native questions with no Vulkan source code involved — use the specific agfx-* skill for that subsystem instead (agfx-presentation-and-swapchain, agfx-render-targets-and-passes, agfx-synchronization, agfx-writing-bindless-shaders).
+description: ALWAYS use when porting an existing Vulkan engine or renderer to AGFX — translating VkDevice/VkCommandBuffer/VkPipeline/VkDescriptorSet/VkRenderPass code to agfxDevice/agfxCommandBuffer/agfxRenderPipeline calls, converting GLSL/HLSL from Vulkan's descriptor-set binding model (or VK_EXT_descriptor_buffer/bindless) to AGFX bindless HLSL, or mapping Vulkan concepts (descriptor sets/pools/layouts, image layouts, pipeline barriers, render passes/dynamic rendering, timeline semaphores) onto their AGFX equivalents. Trigger on VkDevice/VkCommandBuffer/VkImage/VkBuffer/VkPipeline/VkDescriptorSet*, vkCmdPipelineBarrier, VkImageLayout, vkQueueSubmit, VkRenderPass/vkCmdBeginRendering, "port to AGFX", "port from Vulkan". Do NOT trigger for AGFX-native questions with no Vulkan source code involved — use the specific agfx-* skill for that subsystem instead (agfx-presentation-and-swapchain, agfx-render-targets-and-passes, agfx-synchronization, agfx-writing-bindless-shaders, agfx-raytracing, agfx-mdi).
 ---
 
 # Porting a Vulkan Engine to AGFX
@@ -65,12 +65,34 @@ Because Vulkan and AGFX share the same broad shape (explicit command buffers, ex
 4. **One render pass end-to-end.** Convert one `vkCmdBeginRenderPass`/`vkCmdBeginRendering` sequence (with its layout transitions) to `agfxRenderPassBegin`/draw/`End` (`agfx-render-targets-and-passes`), including barriers into the right states beforehand (`agfx-synchronization`) — this is where descriptor-set-to-bindless mistakes surface fastest if the source wasn't already bindless.
 5. **Shaders.** Rewrite each shader's binding section: remove `layout(set=,binding=)` descriptor declarations, replace with `AGFX_PUSH_CONSTANTS` + `ResourceHandle` fields and `AGFXTexture2D`/`AGFXStructuredBuffer`/`AGFXSampler::Create(handle)` calls, replace vertex-input-state fetch with vertex pulling from `SV_VertexID` (`agfx-writing-bindless-shaders`). Do this pass-by-pass alongside step 4 — a shader rewritten without its host-side push-constant struct updated in the same pass won't compile.
 6. **Remaining passes.** Repeat steps 4–5 for every other render/compute pass.
-7. **Cross-cutting**: any stencil-dependent logic (unsupported in AGFX — flag to the user), raytracing (`VkAccelerationStructureKHR`/ray tracing pipelines — AGFX v1.0.0 doesn't support raytracing; flag rather than silently drop), multi-draw indirect (`vkCmdDrawIndirect`/`MultiIndirect` — also unsupported), HDR/resize handling (`agfx-presentation-and-swapchain`).
+7. **Cross-cutting**: any stencil-dependent logic (unsupported in AGFX — flag to the user), then mesh shaders / ray tracing / indirect draws — all supported as of v1.2.0; see "Advanced features" below. HDR/resize handling (`agfx-presentation-and-swapchain`).
+
+## Advanced features: mesh shaders, ray tracing, GPU-driven draws
+
+All three are supported as of **AGFX v1.2.0** (ray tracing landed in v1.1.0, multi-draw indirect in v1.2.0). Each is capability-gated — query once and keep the fallback path alive, since none are universal (Apple silicon needs M3+ for ray tracing and mesh shaders):
+
+```cpp
+agfxDeviceInfo info = {};
+agfxDeviceGetInfo(device, &info);
+// info.supportsRayTracing / info.supportsMeshShaders / info.supportsMultiDrawIndirect
+```
+
+| Vulkan | AGFX | Notes |
+|---|---|---|
+| `vkCmdDrawMeshTasksEXT` + `VK_EXT_mesh_shader` | `agfxRenderPassDrawMesh` + `meshShader`/`taskShader` | task shader → `main_as`, mesh shader → `main_ms` |
+| `VkAccelerationStructureKHR`, `vkCmdBuildAccelerationStructuresKHR` | `agfxAccelerationStructureCreate` + `agfxComputePassBuildAccelerationStructure` | scratch buffer sizing via `agfxAccelerationStructureGetSizes` |
+| `VK_KHR_ray_query` (`rayQueryEXT` in a compute shader) | `RayQuery` in HLSL | direct equivalent — this is the RT model AGFX supports |
+| `vkCmdTraceRaysKHR` + RT pipelines + SBT | **no equivalent** | see the mismatch note below |
+| `vkCmdDrawIndirectCount` / `vkCmdDrawIndexedIndirectCount` | `agfxIndirectBundle` + `PrepareIndirectBundle`/`ExecuteIndirectBundle` | AGFX's count buffer is the direct analogue of Vulkan's; the extra prepare step is a no-op on D3D12 and builds a Metal ICB |
+
+**The one structural mismatch to flag early:** AGFX supports **inline ray tracing only** — `RayQuery`/`TraceRayInline` from a compute shader. There is no ray-generation/any-hit/closest-hit pipeline, no hit groups, and no shader binding table. A source engine built around a ray-tracing *pipeline* needs those passes restructured into compute dispatches that trace inline and shade at the hit point themselves; that is a redesign, not a translation, and is worth surfacing to the user before starting.
+
+Delegate the actual work: **agfx-raytracing** (acceleration structures, inline tracing), **agfx-mdi** (indirect bundles, GPU culling), **agfx-writing-bindless-shaders** (`main_ms`/`main_as` entry points, reflected group sizes) with **agfx-render-targets-and-passes** for `agfxRenderPassDrawMesh`.
 
 ## Common Porting Pitfalls
 
 - **Trying to preserve descriptor set/pool/layout management.** If the source is classic (non-bindless) Vulkan, there's real deletion work here, not just a rename — `agfx-writing-bindless-shaders` for the replacement pattern.
 - **Assuming `agglomerate` has a Vulkan equivalent.** It doesn't — Vulkan already requires explicit per-barrier scope/stage masks, so every AGFX barrier from a Vulkan port should generally pass `agglomerate = true` (ordinary transitions) to get Metal-side hazard tracking; see `agfx-synchronization` for the one exception (present-adjacent transitions).
-- **Assuming raytracing or indirect draw are portable.** Neither is implemented in AGFX v1.0.0. Surface this to the user early if the source engine uses `VkAccelerationStructureKHR` or `vkCmdDrawIndirect`/`MultiIndirect`, rather than discovering it mid-port.
+- **Assuming a Vulkan ray-tracing *pipeline* ports across.** Acceleration structures and `VK_KHR_ray_query` map cleanly, but `vkCmdTraceRaysKHR`, RT pipeline stages, and the SBT have no AGFX equivalent — those passes must be restructured into inline-`RayQuery` compute dispatches. Surface this early. Indirect draws, by contrast, do port (see "Advanced features").
 - **Porting stencil-dependent logic** (`VK_FORMAT_D24_UNORM_S8_UINT`-based effects, stencil-buffer masking). AGFX's pipeline depth state has no stencil fields — flag it rather than silently dropping it.
 - **Missing that AGFX's depth range already matches Vulkan's `[0,1]`** and re-applying a GL-style depth-range fix that isn't needed, or missing a genuine Y-flip discrepancy between the source's off-screen-vs-swapchain convention and AGFX's own.

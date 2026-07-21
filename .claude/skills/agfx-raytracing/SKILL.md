@@ -73,7 +73,7 @@ agfxAccelerationStructure* blas = agfxAccelerationStructureCreate(device, &blasI
 ## Critical gotchas (all learned the hard way)
 
 ### 1. Barrier source state MUST be `RAYTRACING_ACCELERATION_STRUCTURE`, never `COMMON`
-The barrier tracker drops any barrier whose **source** state has an empty producer stage — and `AGFX_RESOURCE_STATE_COMMON` produces stage 0. A `COMMON → RAYTRACING_ACCELERATION_STRUCTURE` barrier is silently a **no-op**, so builds sharing one scratch buffer run concurrently and the TLAS reads half-built BLAS → GPU memory corruption → **device lost / window-server hang**. Use AS→AS:
+`AGFX_RESOURCE_STATE_COMMON` maps to no stages at all — it neither reads nor writes — so a `COMMON → RAYTRACING_ACCELERATION_STRUCTURE` barrier has nothing to order against and is silently a **no-op**. Builds sharing one scratch buffer then run concurrently and the TLAS reads a half-built BLAS → GPU memory corruption → **device lost / window-server hang**. Use AS→AS, which names the acceleration-structure stage on both sides:
 
 ```cpp
 agfxCommandBufferAccelerationStructureBarrier(cmd, as,
@@ -81,6 +81,8 @@ agfxCommandBufferAccelerationStructureBarrier(cmd, as,
     AGFX_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, true);
 ```
 Emit one after each BLAS build (serializes shared-scratch reuse) and one before the TLAS build (orders BLAS-before-TLAS). Give each build its own scratch region instead if you want them to run in parallel.
+
+(Transitions out of *read-only* states — e.g. `PIXEL_SHADER_RESOURCE → UNORDERED_ACCESS` — do work correctly and are not affected by this: the backend orders them against the readers. `COMMON` is the special case, since it names neither readers nor writers. See **agfx-synchronization**.)
 
 ### 2. `vertexOffset` / `indexOffset` in the geometry struct are **byte** offsets
 The C API documents them as "offset" but the backend adds them straight to the buffer GPU address. Pass `elementIndex * stride`, not the raw element index. A raw index gives both a wrong and a misaligned address ("Vertex buffer address must be a multiple of 4 bytes"). The **shader** side, by contrast, indexes by **element** (`vertices.Load(vertexOffset + index)`), so the GPUScene copy of the offset stays an element index — only the AS geometry wants bytes.

@@ -1,6 +1,6 @@
 ---
 name: agfx-porting-from-opengl
-description: ALWAYS use when porting an existing OpenGL (or OpenGL ES) engine or renderer to AGFX — translating glGenTextures/glBindTexture/glBufferData/glUseProgram/FBO code to agfxDevice/agfxCommandBuffer/agfxRenderPipeline calls, converting GLSL uniform/sampler-binding shaders to AGFX bindless HLSL, or mapping OpenGL concepts (the global bind-to-slot state machine, VAOs, FBOs, uniform blocks) onto their AGFX equivalents. Trigger on glGenBuffers/glBindBuffer/glTexImage2D/glUseProgram/glDrawArrays/glDrawElements, GLSL `uniform`/`layout(binding=...)`, VAO/VBO/EBO/FBO, "port to AGFX", "port from OpenGL". Do NOT trigger for AGFX-native questions with no OpenGL source code involved — use the specific agfx-* skill for that subsystem instead (agfx-presentation-and-swapchain, agfx-render-targets-and-passes, agfx-synchronization, agfx-writing-bindless-shaders).
+description: ALWAYS use when porting an existing OpenGL (or OpenGL ES) engine or renderer to AGFX — translating glGenTextures/glBindTexture/glBufferData/glUseProgram/FBO code to agfxDevice/agfxCommandBuffer/agfxRenderPipeline calls, converting GLSL uniform/sampler-binding shaders to AGFX bindless HLSL, or mapping OpenGL concepts (the global bind-to-slot state machine, VAOs, FBOs, uniform blocks) onto their AGFX equivalents. Trigger on glGenBuffers/glBindBuffer/glTexImage2D/glUseProgram/glDrawArrays/glDrawElements, GLSL `uniform`/`layout(binding=...)`, VAO/VBO/EBO/FBO, "port to AGFX", "port from OpenGL". Do NOT trigger for AGFX-native questions with no OpenGL source code involved — use the specific agfx-* skill for that subsystem instead (agfx-presentation-and-swapchain, agfx-render-targets-and-passes, agfx-synchronization, agfx-writing-bindless-shaders, agfx-raytracing, agfx-mdi).
 ---
 
 # Porting an OpenGL Engine to AGFX
@@ -63,6 +63,27 @@ This is the widest conceptual gap of any of the porting skills — OpenGL's impl
 6. **One render pass end-to-end.** Convert one FBO-bind-and-draw sequence to `agfxRenderPassBegin`/draw/`End` (`agfx-render-targets-and-passes`), adding the barriers GL never required by hand (`agfx-synchronization`, or `agfx::ez::Context::SetRenderTargets`/`TransitionTexture` for ez-tracked resources).
 7. **Shaders.** Rewrite GLSL to HLSL per shader (not a source-level auto-translation — different language, different binding model): remove `uniform`/`layout(binding=...)` declarations, replace with `AGFX_PUSH_CONSTANTS` + `ResourceHandle` fields and `AGFXTexture2D`/`AGFXStructuredBuffer`/`AGFXSampler::Create(handle)` calls, replace VAO-driven vertex fetch with vertex pulling from `SV_VertexID` (`agfx-writing-bindless-shaders`). Port a shader and update its host-side push-constant struct together, not as separate passes.
 8. **Remaining passes**, then **cross-cutting**: stencil-dependent logic (unsupported, flag it), MSAA (verify current AGFX support before assuming it maps), HDR/resize (`agfx-presentation-and-swapchain`).
+
+## Advanced features: mesh shaders, ray tracing, GPU-driven draws
+
+All three are supported as of **AGFX v1.2.0** (ray tracing landed in v1.1.0, multi-draw indirect in v1.2.0). Each is capability-gated — query once and keep the fallback path alive, since none are universal (Apple silicon needs M3+ for ray tracing and mesh shaders):
+
+```cpp
+agfxDeviceInfo info = {};
+agfxDeviceGetInfo(device, &info);
+// info.supportsRayTracing / info.supportsMeshShaders / info.supportsMultiDrawIndirect
+```
+
+| OpenGL | AGFX | Notes |
+|---|---|---|
+| `glMultiDrawElementsIndirect` / `glDrawElementsIndirect` (+ `GL_DRAW_INDIRECT_BUFFER`) | `agfxIndirectBundle` + `PrepareIndirectBundle`/`ExecuteIndirectBundle` | closest existing GL analogue; AGFX adds an explicit GPU-written count buffer instead of a fixed `drawcount` |
+| `glMemoryBarrier(GL_COMMAND_BARRIER_BIT)` before an indirect draw | explicit `UNORDERED_ACCESS → AGFX_RESOURCE_STATE_INDIRECT_ARGUMENT` transition | GL engines routinely omit this and get away with it; AGFX will not |
+| `GL_NV_mesh_shader` / `GL_EXT_mesh_shader` | `agfxRenderPassDrawMesh` | vendor extension → first-class |
+| *(no core GL equivalent)* | inline ray tracing (`RayQuery`) | new capability |
+
+**The one structural mismatch to flag early:** AGFX supports **inline ray tracing only** — `RayQuery`/`TraceRayInline` from a compute shader. There is no ray-generation/any-hit/closest-hit pipeline, no hit groups, and no shader binding table. A source engine built around a ray-tracing *pipeline* needs those passes restructured into compute dispatches that trace inline and shade at the hit point themselves; that is a redesign, not a translation, and is worth surfacing to the user before starting.
+
+Delegate the actual work: **agfx-raytracing** (acceleration structures, inline tracing), **agfx-mdi** (indirect bundles, GPU culling), **agfx-writing-bindless-shaders** (`main_ms`/`main_as` entry points, reflected group sizes) with **agfx-render-targets-and-passes** for `agfxRenderPassDrawMesh`.
 
 ## Common Porting Pitfalls
 
