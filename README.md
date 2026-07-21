@@ -57,6 +57,10 @@ In this repository you can find a few different folders:
 - agfx_shader_cli: A CLI to compile AGFX shaders
 - data/shaders: Helpful HLSL header include, and shaders for agfx_imgui and the demo app
 
+## AI Notice
+
+This project was written using AI tools (Claude Code) -- I wrote most of the backend code by hand, and the LLM wrote most of the upper layer stuff (ez, demo etc). Keep it in mind when using this library.
+
 ## Getting started
 
 ### Requirements
