@@ -313,7 +313,9 @@ static void agfxResourceStateToMTLStages(agfxResourceState state, MTLStages* out
         case AGFX_RESOURCE_STATE_DEPTH_READ: *outProducer = 0; *outConsumer = MTLStageFragment; break;
         case AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE: *outProducer = 0; *outConsumer = MTLStageVertex | MTLStageDispatch; break;
         case AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE: *outProducer = 0; *outConsumer = MTLStageFragment; break;
-        case AGFX_RESOURCE_STATE_INDIRECT_ARGUMENT: *outProducer = 0; *outConsumer = MTLStageVertex | MTLStageDispatch; break;
+        // Object/Mesh are included because AGFX_INDIRECT_BUNDLE_TYPE_DRAW_MESH's ICB commands read
+        // the same commands/argument buffers from the object and mesh stages.
+        case AGFX_RESOURCE_STATE_INDIRECT_ARGUMENT: *outProducer = 0; *outConsumer = MTLStageVertex | MTLStageDispatch | MTLStageObject | MTLStageMesh; break;
         case AGFX_RESOURCE_STATE_COPY_DEST: *outProducer = MTLStageBlit; *outConsumer = 0; break;
         case AGFX_RESOURCE_STATE_COPY_SOURCE: *outProducer = 0; *outConsumer = MTLStageBlit; break;
         case AGFX_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE: *outProducer = MTLStageAccelerationStructure; *outConsumer = MTLStageAccelerationStructure; break;
@@ -333,15 +335,23 @@ static void agfxResourceStateToMTLStages(agfxResourceState state, MTLStages* out
 
 struct agfxMetal4BarrierTracker {
     void addBarrier(agfxResourceState oldState, agfxResourceState newState) {
-        MTLStages producerUnused, afterStages;
-        MTLStages beforeStages, consumerUnused;
-        agfxResourceStateToMTLStages(oldState, &afterStages, &consumerUnused);
-        agfxResourceStateToMTLStages(newState, &producerUnused, &beforeStages);
+        MTLStages oldProducer, oldConsumer;
+        MTLStages newProducer, newConsumer;
+        agfxResourceStateToMTLStages(oldState, &oldProducer, &oldConsumer);
+        agfxResourceStateToMTLStages(newState, &newProducer, &newConsumer);
 
-        // Both sides must be non-empty: MTL4DebugCommandEncoder rejects
-        // barrierAfterQueueStages:beforeStages: if either mask is 0, so an empty producer
-        // side (e.g. transitioning out of a read-only or COMMON state, which writes nothing)
-        // means there is nothing to synchronize against regardless of the consumer side.
+        // Stages that must finish first: whoever wrote the resource in its old state - or, when the
+        // old state writes nothing, whoever *read* it. That read-only case is a write-after-read
+        // hazard (e.g. INDIRECT_ARGUMENT -> UNORDERED_ACCESS, where the next frame's culling pass
+        // overwrites a commands buffer the current frame's draws are still reading), and dropping it
+        // for want of a producer would leave the write unordered against those reads.
+        MTLStages afterStages = oldProducer ? oldProducer : oldConsumer;
+        // Stages that must wait: whoever reads the resource in its new state - or, when the new
+        // state only writes (e.g. RENDER_TARGET), whoever writes it.
+        MTLStages beforeStages = newConsumer ? newConsumer : newProducer;
+
+        // MTL4DebugCommandEncoder rejects barrierAfterQueueStages:beforeStages: if either mask is 0,
+        // which now only happens for states that neither read nor write (COMMON/PRESENT).
         if (afterStages == 0 || beforeStages == 0) return;
 
         this->afterStages |= afterStages;
@@ -350,6 +360,8 @@ struct agfxMetal4BarrierTracker {
         pending = true;
     }
 
+    // Flushed at a pass boundary: everything being ordered against lives in prior encoders, which is
+    // exactly what afterQueueStages covers.
     void encode(id<MTL4CommandEncoder> encoder) {
         if (!pending) return;
 
@@ -361,19 +373,377 @@ struct agfxMetal4BarrierTracker {
         pending = false;
     }
 
+    // Flushed in the middle of an open encoder. afterQueueStages explicitly excludes the current
+    // encoder, so a queue barrier alone would not order against work already encoded in this pass
+    // (e.g. a copy earlier in the same compute encoder). Emit the encoder barrier as well, with
+    // stages masked to those this encoder can actually encode.
+    void encodeInline(id<MTL4CommandEncoder> encoder, MTLStages encoderStages) {
+        if (!pending) return;
+
+        MTLStages afterInEncoder = afterStages & encoderStages;
+        MTLStages beforeInEncoder = beforeStages & encoderStages;
+        if (afterInEncoder != 0 && beforeInEncoder != 0) {
+            [encoder barrierAfterEncoderStages:afterInEncoder beforeEncoderStages:beforeInEncoder visibilityOptions:visibility];
+        }
+
+        encode(encoder);
+    }
+
     MTLStages afterStages = 0;
     MTLStages beforeStages = 0;
     MTL4VisibilityOptions visibility = MTL4VisibilityOptionNone;
     bool pending = false;
 };
 
+// Indirect bundle (ICB conversion) internals
+//
+// Metal has no ExecuteIndirect. Indirect draws must be pre-encoded into an MTLIndirectCommandBuffer,
+// one command per draw, which AGFX does from a compute kernel that reads the D3D12-shaped commands
+// buffer the culling shader wrote. See notes/mdi.md.
+
+static uint32_t agfxIndirectBundleTypeStride(agfxIndirectBundleType type) {
+    switch (type) {
+        case AGFX_INDIRECT_BUNDLE_TYPE_DRAW: return sizeof(agfxDrawCommand);
+        case AGFX_INDIRECT_BUNDLE_TYPE_DRAW_INDEXED: return sizeof(agfxDrawIndexedCommand);
+        case AGFX_INDIRECT_BUNDLE_TYPE_DRAW_MESH: return sizeof(agfxDrawMeshCommand);
+        case AGFX_INDIRECT_BUNDLE_TYPE_DISPATCH: return sizeof(agfxDispatchCommand);
+        default: return 0;
+    }
+}
+
+// Argument table slots the conversion kernels read. 0 and 1 are the bindless heaps, already bound
+// on every command buffer's compute argument table; the rest are set per PrepareIndirectBundle call.
+enum {
+    kAGFXICBParamsBindPoint       = 11,
+    kAGFXICBPushConstantsBindPoint= 12,
+    kAGFXICBCommandsBindPoint     = 13,
+    kAGFXICBCountBindPoint        = 14,
+    kAGFXICBTLABBindPoint         = 15,
+    kAGFXICBDrawArgsBindPoint     = 16,
+    kAGFXICBExecRangeBindPoint    = 17,
+    kAGFXICBUniformsBindPoint     = 18,
+    kAGFXICBIndexBufferBindPoint  = 19,
+    kAGFXICBTargetBindPoint       = 20,
+};
+
+// One per-command slice of each of these, sized to the bundle's maxCommandCount.
+struct agfxICBDrawArgsSlice {
+    // Mirrors IRRuntimeDrawParams (msc_runtime/metal_irconverter_runtime.h): the largest member is
+    // IRRuntimeDrawIndexedArgument at 5 x 4 bytes.
+    uint32_t words[5];
+};
+
+struct agfxICBConvertParams {
+    uint32_t commandOffset;
+    uint32_t countIndex;
+    uint32_t maxCommandCount;
+    uint32_t primitiveType;     // MTLPrimitiveType
+    uint32_t use16BitIndices;
+    uint32_t indexStride;
+    uint32_t objectThreadsPerGroup[3];
+    uint32_t meshThreadsPerGroup[3];
+    uint32_t threadsPerGroup[3];
+};
+
+// Compiled with newLibraryWithSource: at device creation - target("agfx") has no offline shader
+// build step, so the few MSC runtime structs these kernels need are restated here rather than
+// #include'd from msc_runtime/metal_irconverter_runtime.h. The bind-point constants below must stay
+// in sync with kIRDescriptorHeapBindPoint/kIRSamplerHeapBindPoint/kIRArgumentBufferBindPoint/
+// kIRArgumentBufferDrawArgumentsBindPoint/kIRArgumentBufferUniformsBindPoint in that header, and the
+// command structs with agfxDrawCommand & friends in agfx.h.
+static const char* kAGFXICBConvertSource = R"METAL(
+#include <metal_stdlib>
+#include <metal_command_buffer>
+using namespace metal;
+
+// Must match kIR*BindPoint in metal_irconverter_runtime.h.
+constant uint kIRDescriptorHeap  = 0;
+constant uint kIRSamplerHeap     = 1;
+constant uint kIRArgumentBuffer  = 2;
+constant uint kIRDrawArguments   = 4;
+constant uint kIRUniforms        = 5;
+
+struct ICBConvertParams {
+    uint commandOffset;
+    uint countIndex;
+    uint maxCommandCount;
+    uint primitiveType;
+    uint use16BitIndices;
+    uint indexStride;
+    uint objectThreadsPerGroup[3];
+    uint meshThreadsPerGroup[3];
+    uint threadsPerGroup[3];
+};
+
+struct ICBExecutionRange {
+    uint location;
+    uint length;
+};
+
+// Mirrors agfxTLAB: 128 bytes of push constants followed by the per-draw drawID, which is where
+// Metal Shader Converter expects the b1 root constant to live.
+struct TLAB {
+    uchar bytes[128];
+    uint  drawID;
+};
+
+// Mirrors agfxDrawCommand / agfxDrawIndexedCommand / agfxDrawMeshCommand / agfxDispatchCommand
+// (agfx.h). drawID is the leading field on all but dispatch.
+struct DrawCommand        { uint drawID; uint vertexCount; uint instanceCount; uint firstVertex; uint firstInstance; };
+struct DrawIndexedCommand { uint drawID; uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance; };
+struct DrawMeshCommand    { uint drawID; uint groupSizeX; uint groupSizeY; uint groupSizeZ; };
+struct DispatchCommand    { uint groupCountX; uint groupCountY; uint groupCountZ; };
+
+// An MTLIndirectCommandBuffer cannot be a direct kernel buffer argument; it is reached through an
+// argument-buffer struct holding its resource ID, which the CPU side writes once at bundle creation.
+struct ICBContainer { command_buffer icb; };
+
+// Mirrors IRRuntimeDrawArgument / IRRuntimeDrawIndexedArgument.
+struct RuntimeDrawArgument        { uint vertexCountPerInstance; uint instanceCount; uint startVertexLocation; uint startInstanceLocation; uint pad; };
+struct RuntimeDrawIndexedArgument { uint indexCountPerInstance; uint instanceCount; uint startIndexLocation; int baseVertexLocation; uint startInstanceLocation; };
+
+// Writes the execution range that actually bounds ICB replay. Commands past the live count are
+// never executed however stale their contents, so no reset pass is needed when the draw count
+// shrinks frame to frame.
+static uint icb_live_count(device const uint* countBuffer,
+                           device ICBExecutionRange* execRanges,
+                           constant ICBConvertParams& params,
+                           uint tid)
+{
+    uint live = min(countBuffer[params.countIndex], params.maxCommandCount);
+    if (tid == 0) {
+        execRanges[params.countIndex].location = params.commandOffset;
+        execRanges[params.countIndex].length = live;
+    }
+    return live;
+}
+
+static void icb_fill_tlab(device TLAB& tlab, constant uchar* pushConstants, uint drawID)
+{
+    for (uint b = 0; b < 128; ++b) {
+        tlab.bytes[b] = pushConstants[b];
+    }
+    tlab.drawID = drawID;
+}
+
+// ICB commands inherit nothing (inheritBuffers = NO), so every binding the converted shaders expect
+// is rebound per command, on every stage that can read it.
+static void icb_bind_render(thread render_command& cmd,
+                            device const void* resourceHeap,
+                            device const void* samplerHeap,
+                            device const void* tlab,
+                            device const void* drawArgs,
+                            device const void* uniforms)
+{
+    cmd.set_vertex_buffer(resourceHeap, kIRDescriptorHeap);
+    cmd.set_vertex_buffer(samplerHeap, kIRSamplerHeap);
+    cmd.set_vertex_buffer(tlab, kIRArgumentBuffer);
+    cmd.set_vertex_buffer(drawArgs, kIRDrawArguments);
+    cmd.set_vertex_buffer(uniforms, kIRUniforms);
+
+    cmd.set_fragment_buffer(resourceHeap, kIRDescriptorHeap);
+    cmd.set_fragment_buffer(samplerHeap, kIRSamplerHeap);
+    cmd.set_fragment_buffer(tlab, kIRArgumentBuffer);
+    cmd.set_fragment_buffer(drawArgs, kIRDrawArguments);
+    cmd.set_fragment_buffer(uniforms, kIRUniforms);
+}
+
+static void icb_bind_mesh(thread render_command& cmd,
+                          device const void* resourceHeap,
+                          device const void* samplerHeap,
+                          device const void* tlab,
+                          device const void* drawArgs,
+                          device const void* uniforms)
+{
+    cmd.set_object_buffer(resourceHeap, kIRDescriptorHeap);
+    cmd.set_object_buffer(samplerHeap, kIRSamplerHeap);
+    cmd.set_object_buffer(tlab, kIRArgumentBuffer);
+    cmd.set_object_buffer(drawArgs, kIRDrawArguments);
+    cmd.set_object_buffer(uniforms, kIRUniforms);
+
+    cmd.set_mesh_buffer(resourceHeap, kIRDescriptorHeap);
+    cmd.set_mesh_buffer(samplerHeap, kIRSamplerHeap);
+    cmd.set_mesh_buffer(tlab, kIRArgumentBuffer);
+    cmd.set_mesh_buffer(drawArgs, kIRDrawArguments);
+    cmd.set_mesh_buffer(uniforms, kIRUniforms);
+
+    cmd.set_fragment_buffer(resourceHeap, kIRDescriptorHeap);
+    cmd.set_fragment_buffer(samplerHeap, kIRSamplerHeap);
+    cmd.set_fragment_buffer(tlab, kIRArgumentBuffer);
+    cmd.set_fragment_buffer(drawArgs, kIRDrawArguments);
+    cmd.set_fragment_buffer(uniforms, kIRUniforms);
+}
+
+static primitive_type icb_primitive_type(uint type)
+{
+    // Matches MTLPrimitiveType.
+    switch (type) {
+        case 0: return primitive_type::point;
+        case 1: return primitive_type::line;
+        case 2: return primitive_type::line_strip;
+        case 4: return primitive_type::triangle_strip;
+        default: return primitive_type::triangle;
+    }
+}
+
+kernel void icb_convert_draw(device const DrawCommand* commands       [[buffer(13)]],
+                             device const uint* countBuffer           [[buffer(14)]],
+                             device TLAB* tlabSlices                  [[buffer(15)]],
+                             device RuntimeDrawArgument* drawArgs     [[buffer(16)]],
+                             device ICBExecutionRange* execRanges     [[buffer(17)]],
+                             device const void* uniforms              [[buffer(18)]],
+                             device const void* resourceHeap          [[buffer(0)]],
+                             device const void* samplerHeap           [[buffer(1)]],
+                             constant uchar* pushConstants            [[buffer(12)]],
+                             constant ICBConvertParams& params        [[buffer(11)]],
+                             device ICBContainer* icbContainer         [[buffer(20)]],
+                             uint tid [[thread_position_in_grid]])
+{
+    uint live = icb_live_count(countBuffer, execRanges, params, tid);
+    if (tid >= live) return;
+
+    uint slot = params.commandOffset + tid;
+    DrawCommand c = commands[slot];
+
+    icb_fill_tlab(tlabSlices[slot], pushConstants, c.drawID);
+
+    RuntimeDrawArgument arg;
+    arg.vertexCountPerInstance = c.vertexCount;
+    arg.instanceCount = c.instanceCount;
+    arg.startVertexLocation = c.firstVertex;
+    arg.startInstanceLocation = c.firstInstance;
+    arg.pad = 0;
+    drawArgs[slot] = arg;
+
+    render_command cmd(icbContainer->icb, slot);
+    icb_bind_render(cmd, resourceHeap, samplerHeap, &tlabSlices[slot], &drawArgs[slot], uniforms);
+    cmd.draw_primitives(icb_primitive_type(params.primitiveType),
+                        c.firstVertex, c.vertexCount, c.instanceCount, c.firstInstance);
+}
+
+kernel void icb_convert_draw_indexed(device const DrawIndexedCommand* commands  [[buffer(13)]],
+                                     device const uint* countBuffer             [[buffer(14)]],
+                                     device TLAB* tlabSlices                    [[buffer(15)]],
+                                     device RuntimeDrawIndexedArgument* drawArgs[[buffer(16)]],
+                                     device ICBExecutionRange* execRanges       [[buffer(17)]],
+                                     device const void* uniforms                [[buffer(18)]],
+                                     device const uchar* indexBuffer            [[buffer(19)]],
+                                     device const void* resourceHeap            [[buffer(0)]],
+                                     device const void* samplerHeap             [[buffer(1)]],
+                                     constant uchar* pushConstants              [[buffer(12)]],
+                                     constant ICBConvertParams& params          [[buffer(11)]],
+                                     device ICBContainer* icbContainer           [[buffer(20)]],
+                                     uint tid [[thread_position_in_grid]])
+{
+    uint live = icb_live_count(countBuffer, execRanges, params, tid);
+    if (tid >= live) return;
+
+    uint slot = params.commandOffset + tid;
+    DrawIndexedCommand c = commands[slot];
+
+    icb_fill_tlab(tlabSlices[slot], pushConstants, c.drawID);
+
+    RuntimeDrawIndexedArgument arg;
+    arg.indexCountPerInstance = c.indexCount;
+    arg.instanceCount = c.instanceCount;
+    arg.startIndexLocation = c.firstIndex;
+    arg.baseVertexLocation = c.vertexOffset;
+    arg.startInstanceLocation = c.firstInstance;
+    drawArgs[slot] = arg;
+
+    render_command cmd(icbContainer->icb, slot);
+    icb_bind_render(cmd, resourceHeap, samplerHeap, &tlabSlices[slot], &drawArgs[slot], uniforms);
+
+    // draw_indexed_primitives takes a typed pointer already advanced to the first index, mirroring
+    // the gpuAddress + firstIndex * stride offset the direct DrawIndexed path applies.
+    device const uchar* first = indexBuffer + (uint64_t)c.firstIndex * params.indexStride;
+    if (params.use16BitIndices != 0) {
+        cmd.draw_indexed_primitives(icb_primitive_type(params.primitiveType),
+                                    c.indexCount, (device const ushort*)first,
+                                    c.instanceCount, c.vertexOffset, c.firstInstance);
+    } else {
+        cmd.draw_indexed_primitives(icb_primitive_type(params.primitiveType),
+                                    c.indexCount, (device const uint*)first,
+                                    c.instanceCount, c.vertexOffset, c.firstInstance);
+    }
+}
+
+kernel void icb_convert_draw_mesh(device const DrawMeshCommand* commands  [[buffer(13)]],
+                                  device const uint* countBuffer          [[buffer(14)]],
+                                  device TLAB* tlabSlices                 [[buffer(15)]],
+                                  device RuntimeDrawArgument* drawArgs    [[buffer(16)]],
+                                  device ICBExecutionRange* execRanges    [[buffer(17)]],
+                                  device const void* uniforms             [[buffer(18)]],
+                                  device const void* resourceHeap         [[buffer(0)]],
+                                  device const void* samplerHeap          [[buffer(1)]],
+                                  constant uchar* pushConstants           [[buffer(12)]],
+                                  constant ICBConvertParams& params       [[buffer(11)]],
+                                  device ICBContainer* icbContainer        [[buffer(20)]],
+                                  uint tid [[thread_position_in_grid]])
+{
+    uint live = icb_live_count(countBuffer, execRanges, params, tid);
+    if (tid >= live) return;
+
+    uint slot = params.commandOffset + tid;
+    DrawMeshCommand c = commands[slot];
+
+    icb_fill_tlab(tlabSlices[slot], pushConstants, c.drawID);
+
+    RuntimeDrawArgument arg;
+    arg.vertexCountPerInstance = c.groupSizeX;
+    arg.instanceCount = c.groupSizeY;
+    arg.startVertexLocation = c.groupSizeZ;
+    arg.startInstanceLocation = 0;
+    arg.pad = 0;
+    drawArgs[slot] = arg;
+
+    render_command cmd(icbContainer->icb, slot);
+    icb_bind_mesh(cmd, resourceHeap, samplerHeap, &tlabSlices[slot], &drawArgs[slot], uniforms);
+    cmd.draw_mesh_threadgroups(uint3(c.groupSizeX, c.groupSizeY, c.groupSizeZ),
+                               uint3(params.objectThreadsPerGroup[0], params.objectThreadsPerGroup[1], params.objectThreadsPerGroup[2]),
+                               uint3(params.meshThreadsPerGroup[0], params.meshThreadsPerGroup[1], params.meshThreadsPerGroup[2]));
+}
+
+// agfxDispatchCommand carries no drawID (see notes/mdi.md open question #5), so there is no
+// per-command varying part of the TLAB - every command gets the same push constants.
+kernel void icb_convert_dispatch(device const DispatchCommand* commands [[buffer(13)]],
+                                 device const uint* countBuffer         [[buffer(14)]],
+                                 device TLAB* tlabSlices                [[buffer(15)]],
+                                 device ICBExecutionRange* execRanges   [[buffer(17)]],
+                                 device const void* resourceHeap        [[buffer(0)]],
+                                 device const void* samplerHeap         [[buffer(1)]],
+                                 constant uchar* pushConstants          [[buffer(12)]],
+                                 constant ICBConvertParams& params      [[buffer(11)]],
+                                 device ICBContainer* icbContainer       [[buffer(20)]],
+                                 uint tid [[thread_position_in_grid]])
+{
+    uint live = icb_live_count(countBuffer, execRanges, params, tid);
+    if (tid >= live) return;
+
+    uint slot = params.commandOffset + tid;
+    DispatchCommand c = commands[slot];
+
+    icb_fill_tlab(tlabSlices[slot], pushConstants, 0);
+
+    compute_command cmd(icbContainer->icb, slot);
+    cmd.set_kernel_buffer(resourceHeap, kIRDescriptorHeap);
+    cmd.set_kernel_buffer(samplerHeap, kIRSamplerHeap);
+    cmd.set_kernel_buffer(&tlabSlices[slot], kIRArgumentBuffer);
+    cmd.concurrent_dispatch_threadgroups(uint3(c.groupCountX, c.groupCountY, c.groupCountZ),
+                                         uint3(params.threadsPerGroup[0], params.threadsPerGroup[1], params.threadsPerGroup[2]));
+}
+)METAL";
+
 // Device
 struct agfxDevice {
     agfxDeviceCreateInfo createInfo;
     id<MTLDevice> device;
     id<MTLResidencySet> residencySet;
-    
+
     agfxMetalBindlessManager* bindlessManager = nullptr;
+
+    id<MTLLibrary> internalLibrary;
+    id<MTLComputePipelineState> icbConvertPipelines[4]; // indexed by agfxIndirectBundleType
 };
 
 agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo) {
@@ -387,10 +757,39 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo) {
 
     void* memory = createInfo->allocate(sizeof(agfxMetalBindlessManager));
     device->bindlessManager = new(memory) agfxMetalBindlessManager(device->device, device->residencySet);
+
+    // Engine-internal ICB conversion kernels, compiled from source once per device.
+    NSError* internalLibraryError = nil;
+    device->internalLibrary = [device->device newLibraryWithSource:[NSString stringWithUTF8String:kAGFXICBConvertSource]
+                                                          options:nil
+                                                            error:&internalLibraryError];
+    if (!device->internalLibrary) {
+        NSLog(@"agfx: failed to compile internal shader library: %@", internalLibraryError);
+    } else {
+        static const char* kICBConvertEntryPoints[4] = {
+            "icb_convert_draw",         // AGFX_INDIRECT_BUNDLE_TYPE_DRAW
+            "icb_convert_draw_indexed", // AGFX_INDIRECT_BUNDLE_TYPE_DRAW_INDEXED
+            "icb_convert_draw_mesh",    // AGFX_INDIRECT_BUNDLE_TYPE_DRAW_MESH
+            "icb_convert_dispatch",     // AGFX_INDIRECT_BUNDLE_TYPE_DISPATCH
+        };
+        for (uint32_t i = 0; i < 4; ++i) {
+            id<MTLFunction> function = [device->internalLibrary newFunctionWithName:[NSString stringWithUTF8String:kICBConvertEntryPoints[i]]];
+            NSError* pipelineError = nil;
+            device->icbConvertPipelines[i] = [device->device newComputePipelineStateWithFunction:function error:&pipelineError];
+            if (!device->icbConvertPipelines[i]) {
+                NSLog(@"agfx: failed to create %s pipeline: %@", kICBConvertEntryPoints[i], pipelineError);
+            }
+        }
+    }
+
     return device;
 }
 
 void agfxDeviceDestroy(agfxDevice* device) {
+    for (uint32_t i = 0; i < 4; ++i) {
+        device->icbConvertPipelines[i] = nil;
+    }
+    device->internalLibrary = nil;
     device->bindlessManager->~agfxMetalBindlessManager();
     device->createInfo.free(device->bindlessManager);
     device->residencySet = nil;
@@ -512,6 +911,12 @@ struct agfxCommandBuffer {
     id<MTL4ArgumentTable> renderArgumentTable;
     id<MTL4ArgumentTable> computeArgumentTable;
     agfxMetal4BarrierTracker barrierTracker;
+    // The encoder currently open on this command buffer, if any. Barriers requested while a pass is
+    // open must be encoded immediately: the tracker is otherwise only flushed at the next pass
+    // begin, which would defer a mid-pass transition past the very work it is meant to order.
+    id<MTL4CommandEncoder> currentEncoder;
+    // The MTLStages the open encoder can encode barriers for; encoder barriers may only name these.
+    MTLStages currentEncoderStages;
 
     agfxMetalLinearAllocator* topLevelArgBufferAllocator;
     agfxMetalLinearAllocator* drawArgumentAllocator;
@@ -520,6 +925,8 @@ struct agfxCommandBuffer {
 
 agfxCommandBuffer* agfxCommandBufferCreate(agfxDevice* device, agfxCommandQueue* queue) {
     agfxCommandBuffer* commandBuffer = (agfxCommandBuffer*)device->createInfo.allocate(sizeof(agfxCommandBuffer));
+    // The allocator hands back raw memory; the ARC-managed Metal object members must start nil.
+    memset((void*)commandBuffer, 0, sizeof(agfxCommandBuffer));
     commandBuffer->device = device;
     commandBuffer->commandAllocator = [device->device newCommandAllocator];
     commandBuffer->commandBuffer = [device->device newCommandBuffer];
@@ -597,16 +1004,25 @@ void agfxCommandQueueSubmit(agfxCommandQueue* queue, agfxCommandBuffer** command
 void agfxCommandBufferTextureBarrier(agfxCommandBuffer* commandBuffer, agfxTexture* texture,  agfxResourceState oldState, agfxResourceState newState, uint32_t mip, uint32_t layer, agfxBool agglomerate) {
     if (!agglomerate) return;
     commandBuffer->barrierTracker.addBarrier(oldState, newState);
+    if (commandBuffer->currentEncoder) {
+        commandBuffer->barrierTracker.encodeInline(commandBuffer->currentEncoder, commandBuffer->currentEncoderStages);
+    }
 }
 
 void agfxCommandBufferBufferBarrier(agfxCommandBuffer* commandBuffer, agfxBuffer* buffer, agfxResourceState oldState, agfxResourceState newState, agfxBool agglomerate) {
     if (!agglomerate) return;
     commandBuffer->barrierTracker.addBarrier(oldState, newState);
+    if (commandBuffer->currentEncoder) {
+        commandBuffer->barrierTracker.encodeInline(commandBuffer->currentEncoder, commandBuffer->currentEncoderStages);
+    }
 }
 
 void agfxCommandBufferAccelerationStructureBarrier(agfxCommandBuffer* commandBuffer, agfxAccelerationStructure* accelerationStructure, agfxResourceState oldState, agfxResourceState newState, agfxBool agglomerate) {
     if (!agglomerate) return;
     commandBuffer->barrierTracker.addBarrier(oldState, newState);
+    if (commandBuffer->currentEncoder) {
+        commandBuffer->barrierTracker.encodeInline(commandBuffer->currentEncoder, commandBuffer->currentEncoderStages);
+    }
 }
 
 // Texture
@@ -671,6 +1087,8 @@ agfxComputePass* agfxComputePassBegin(agfxCommandBuffer* commandBuffer, const ch
     computePass->device = commandBuffer->device;
     computePass->commandBuffer = commandBuffer;
     commandBuffer->barrierTracker.encode(computePass->encoder);
+    commandBuffer->currentEncoder = computePass->encoder;
+    commandBuffer->currentEncoderStages = MTLStageDispatch | MTLStageBlit | MTLStageAccelerationStructure;
 
     [computePass->encoder setArgumentTable:commandBuffer->computeArgumentTable];
 
@@ -679,16 +1097,20 @@ agfxComputePass* agfxComputePassBegin(agfxCommandBuffer* commandBuffer, const ch
 
 void agfxComputePassEnd(agfxComputePass* computePass) {
     [computePass->encoder endEncoding];
+    computePass->commandBuffer->currentEncoder = nil;
     computePass->encoder = nil;
     computePass->device->createInfo.tempFree(computePass);
 }
 
 void agfxComputePassTextureUAVBarrier(agfxComputePass* computePass, agfxTexture* texture) {
-    [computePass->encoder barrierAfterQueueStages:MTLStageDispatch beforeStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    // Within one encoder, so this is an encoder barrier: afterQueueStages explicitly excludes the
+    // current encoder and would not order this against the dispatch that just wrote the resource.
+    [computePass->encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
 }
 
 void agfxComputePassBufferUAVBarrier(agfxComputePass* computePass, agfxBuffer* buffer) {
-    [computePass->encoder barrierAfterQueueStages:MTLStageDispatch beforeStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+    // See agfxComputePassTextureUAVBarrier: intra-encoder ordering needs the encoder barrier.
+    [computePass->encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
 }
 
 void agfxComputePassCopyTextureToBuffer(agfxComputePass* computePass, agfxTexture* texture, agfxBuffer* buffer, uint64_t bufferOffset, const agfxTextureRegion* region, uint32_t mipLevel, uint32_t layer, uint32_t bytesPerRow, uint32_t bytesPerImage) {
@@ -967,11 +1389,14 @@ agfxRenderPass* agfxRenderPassBegin(agfxCommandBuffer* cmdBuffer, const agfxRend
     [renderPass->encoder setArgumentTable:cmdBuffer->renderArgumentTable atStages:MTLStageVertex | MTLStageFragment | MTLStageObject | MTLStageMesh];
 
     cmdBuffer->barrierTracker.encode(renderPass->encoder);
+    cmdBuffer->currentEncoder = renderPass->encoder;
+    cmdBuffer->currentEncoderStages = MTLStageVertex | MTLStageFragment | MTLStageTile | MTLStageObject | MTLStageMesh;
     return renderPass;
 }
 
 void agfxRenderPassEnd(agfxRenderPass* renderPass) {
     [renderPass->encoder endEncoding];
+    renderPass->cmdBuffer->currentEncoder = nil;
     renderPass->encoder = nil;
     renderPass->device->createInfo.tempFree(renderPass);
 }
@@ -1228,6 +1653,10 @@ agfxComputePipeline* agfxComputePipelineCreate(agfxDevice* device, const agfxCom
     MTLComputePipelineDescriptor* descriptor = [MTLComputePipelineDescriptor new];
     descriptor.label = [NSString stringWithUTF8String:createInfo->name];
     descriptor.computeFunction = createInfo->computeShader->function;
+    // agfxComputePipelineCreateInfo has no supportsIndirect flag (unlike the render one), and a
+    // compute PSO used from an AGFX_INDIRECT_BUNDLE_TYPE_DISPATCH ICB must declare support, so it is
+    // always on. Compute PSOs are cheap enough that the blanket cost isn't worth an API change.
+    descriptor.supportIndirectCommandBuffers = YES;
 
     agfxComputePipeline* pipeline = (agfxComputePipeline*)device->createInfo.allocate(sizeof(agfxComputePipeline));
     memcpy(&pipeline->createInfo, createInfo, sizeof(agfxComputePipelineCreateInfo));
@@ -1586,4 +2015,229 @@ MTLPrimitiveTopologyClass agfxPrimitiveTopologyClassToMTL(agfxTopology topology)
         case AGFX_TOPOLOGY_POINTS: return MTLPrimitiveTopologyClassPoint;
         default: return MTLPrimitiveTopologyClassTriangle; // Default to triangle if unknown
     }
+}
+
+// Indirect bundle
+struct agfxIndirectBundle {
+    agfxIndirectBundleCreateInfo createInfo;
+    agfxBuffer* commandsBuffer;
+    agfxBufferView* commandsBufferView;
+    agfxBuffer* countBuffer;
+    agfxBufferView* countBufferView;
+    uint32_t stride;
+
+    // Metal-only: there is no ExecuteIndirect, so draws are pre-encoded into an ICB by the
+    // conversion kernel, which also needs somewhere to put the per-command bindings those commands
+    // reference (ICB commands inherit no buffer state).
+    id<MTLIndirectCommandBuffer> icb;
+    id<MTLBuffer> tlabSlices;       // agfxTLAB per command
+    id<MTLBuffer> drawArgsSlices;   // agfxICBDrawArgsSlice per command
+    id<MTLBuffer> execRanges;       // MTLIndirectCommandBufferExecutionRange per count slot
+    id<MTLBuffer> uniforms;         // draw-type tag, shared by every command in the bundle
+    id<MTLBuffer> icbContainer;     // argument buffer holding icb.gpuResourceID, the only way a kernel can reach an ICB
+};
+
+agfxIndirectBundle* agfxIndirectBundleCreate(agfxDevice* device, const agfxIndirectBundleCreateInfo* createInfo) {
+    agfxIndirectBundle* bundle = (agfxIndirectBundle*)device->createInfo.allocate(sizeof(agfxIndirectBundle));
+    // The allocator hands back raw memory; the ARC-managed Metal object members must start nil.
+    memset((void*)bundle, 0, sizeof(agfxIndirectBundle));
+    memcpy(&bundle->createInfo, createInfo, sizeof(agfxIndirectBundleCreateInfo));
+    bundle->stride = agfxIndirectBundleTypeStride(createInfo->type);
+
+    agfxBufferCreateInfo commandsBufferInfo = {};
+    commandsBufferInfo.size = (uint64_t)createInfo->maxCommandCount * bundle->stride;
+    commandsBufferInfo.stride = bundle->stride;
+    commandsBufferInfo.usage = (agfxBufferUsage)(AGFX_BUFFER_USAGE_SHADER_READ | AGFX_BUFFER_USAGE_SHADER_WRITE);
+    commandsBufferInfo.memoryType = AGFX_BUFFER_MEMORY_TYPE_GPU_ONLY;
+    bundle->commandsBuffer = agfxBufferCreate(device, &commandsBufferInfo);
+
+    agfxBufferCreateInfo countBufferInfo = {};
+    countBufferInfo.size = (uint64_t)createInfo->maxCountCount * sizeof(uint32_t);
+    countBufferInfo.stride = sizeof(uint32_t);
+    countBufferInfo.usage = (agfxBufferUsage)(AGFX_BUFFER_USAGE_SHADER_READ | AGFX_BUFFER_USAGE_SHADER_WRITE);
+    countBufferInfo.memoryType = AGFX_BUFFER_MEMORY_TYPE_GPU_ONLY;
+    bundle->countBuffer = agfxBufferCreate(device, &countBufferInfo);
+
+    agfxBufferViewCreateInfo commandsViewInfo = {};
+    commandsViewInfo.buffer = bundle->commandsBuffer;
+    commandsViewInfo.type = AGFX_BUFFER_VIEW_TYPE_RAW;
+    commandsViewInfo.writeable = true;
+    bundle->commandsBufferView = agfxBufferViewCreate(device, &commandsViewInfo);
+
+    agfxBufferViewCreateInfo countViewInfo = {};
+    countViewInfo.buffer = bundle->countBuffer;
+    countViewInfo.type = AGFX_BUFFER_VIEW_TYPE_RAW;
+    countViewInfo.writeable = true;
+    bundle->countBufferView = agfxBufferViewCreate(device, &countViewInfo);
+
+    MTLIndirectCommandBufferDescriptor* icbDesc = [MTLIndirectCommandBufferDescriptor new];
+    switch (createInfo->type) {
+        case AGFX_INDIRECT_BUNDLE_TYPE_DRAW:
+            icbDesc.commandTypes = MTLIndirectCommandTypeDraw;
+            break;
+        case AGFX_INDIRECT_BUNDLE_TYPE_DRAW_INDEXED:
+            icbDesc.commandTypes = MTLIndirectCommandTypeDrawIndexed;
+            break;
+        case AGFX_INDIRECT_BUNDLE_TYPE_DRAW_MESH:
+            icbDesc.commandTypes = MTLIndirectCommandTypeDrawMeshThreadgroups;
+            break;
+        case AGFX_INDIRECT_BUNDLE_TYPE_DISPATCH:
+            icbDesc.commandTypes = MTLIndirectCommandTypeConcurrentDispatch;
+            break;
+    }
+    // Commands are fully self-contained (the conversion kernel rebinds everything per command), but
+    // the pipeline is uniform across an execute call and is set on the encoder instead.
+    icbDesc.inheritBuffers = NO;
+    icbDesc.inheritPipelineState = YES;
+    icbDesc.maxVertexBufferBindCount = 8;
+    icbDesc.maxFragmentBufferBindCount = 8;
+    icbDesc.maxObjectBufferBindCount = 8;
+    icbDesc.maxMeshBufferBindCount = 8;
+    icbDesc.maxKernelBufferBindCount = 8;
+
+    bundle->icb = [device->device newIndirectCommandBufferWithDescriptor:icbDesc
+                                                         maxCommandCount:createInfo->maxCommandCount
+                                                                 options:MTLResourceStorageModePrivate];
+    [device->residencySet addAllocation:bundle->icb];
+
+    bundle->icbContainer = [device->device newBufferWithLength:sizeof(MTLResourceID) options:MTLResourceStorageModeShared];
+    *(MTLResourceID*)bundle->icbContainer.contents = bundle->icb.gpuResourceID;
+    [device->residencySet addAllocation:bundle->icbContainer];
+
+    bundle->tlabSlices = [device->device newBufferWithLength:(uint64_t)createInfo->maxCommandCount * sizeof(agfxTLAB)
+                                                    options:MTLResourceStorageModePrivate];
+    [device->residencySet addAllocation:bundle->tlabSlices];
+
+    bundle->drawArgsSlices = [device->device newBufferWithLength:(uint64_t)createInfo->maxCommandCount * sizeof(agfxICBDrawArgsSlice)
+                                                        options:MTLResourceStorageModePrivate];
+    [device->residencySet addAllocation:bundle->drawArgsSlices];
+
+    bundle->execRanges = [device->device newBufferWithLength:(uint64_t)createInfo->maxCountCount * sizeof(MTLIndirectCommandBufferExecutionRange)
+                                                     options:MTLResourceStorageModePrivate];
+    [device->residencySet addAllocation:bundle->execRanges];
+
+    // The draw-type tag Metal Shader Converter's vertex prologue reads to reconstruct SV_VertexID /
+    // SV_InstanceID. Constant for the whole bundle, so it is filled once here rather than per
+    // conversion; index type is patched in PrepareIndirectBundle once the index buffer is known.
+    bundle->uniforms = [device->device newBufferWithLength:sizeof(uint16_t) options:MTLResourceStorageModeShared];
+    *(uint16_t*)bundle->uniforms.contents = kIRNonIndexedDraw;
+    [device->residencySet addAllocation:bundle->uniforms];
+
+    return bundle;
+}
+
+void agfxIndirectBundleDestroy(agfxDevice* device, agfxIndirectBundle* bundle) {
+    if (bundle->icbContainer) [device->residencySet removeAllocation:bundle->icbContainer];
+    if (bundle->uniforms) [device->residencySet removeAllocation:bundle->uniforms];
+    if (bundle->execRanges) [device->residencySet removeAllocation:bundle->execRanges];
+    if (bundle->drawArgsSlices) [device->residencySet removeAllocation:bundle->drawArgsSlices];
+    if (bundle->tlabSlices) [device->residencySet removeAllocation:bundle->tlabSlices];
+    if (bundle->icb) [device->residencySet removeAllocation:bundle->icb];
+    bundle->icbContainer = nil;
+    bundle->uniforms = nil;
+    bundle->execRanges = nil;
+    bundle->drawArgsSlices = nil;
+    bundle->tlabSlices = nil;
+    bundle->icb = nil;
+
+    if (bundle->commandsBufferView) agfxBufferViewDestroy(device, bundle->commandsBufferView);
+    if (bundle->commandsBuffer) agfxBufferDestroy(device, bundle->commandsBuffer);
+    if (bundle->countBufferView) agfxBufferViewDestroy(device, bundle->countBufferView);
+    if (bundle->countBuffer) agfxBufferDestroy(device, bundle->countBuffer);
+    device->createInfo.free(bundle);
+}
+
+uint64_t agfxIndirectBundleGetHandle(agfxIndirectBundle* bundle) {
+    return ((uint64_t)agfxBufferViewGetHandle(bundle->countBufferView) << 32) | agfxBufferViewGetHandle(bundle->commandsBufferView);
+}
+
+agfxBuffer* agfxIndirectBundleGetCommandsBuffer(agfxIndirectBundle* bundle) {
+    return bundle->commandsBuffer;
+}
+
+agfxBuffer* agfxIndirectBundleGetCountBuffer(agfxIndirectBundle* bundle) {
+    return bundle->countBuffer;
+}
+
+void agfxComputePassPrepareIndirectBundle(agfxComputePass* computePass, agfxIndirectBundle* bundle, const agfxIndirectBundleExecuteInfo* executeInfo) {
+    agfxDevice* device = computePass->device;
+    agfxCommandBuffer* commandBuffer = computePass->commandBuffer;
+    agfxIndirectBundleType type = bundle->createInfo.type;
+
+    id<MTLComputePipelineState> convertPipeline = device->icbConvertPipelines[type];
+    if (!convertPipeline || executeInfo->maxCommandCount == 0) return;
+
+    agfxICBConvertParams params = {};
+    params.commandOffset = executeInfo->commandOffset;
+    params.countIndex = executeInfo->countIndex;
+    params.maxCommandCount = executeInfo->maxCommandCount;
+
+    if (type == AGFX_INDIRECT_BUNDLE_TYPE_DISPATCH) {
+        const agfxComputePipelineCreateInfo& info = executeInfo->computePipeline->createInfo;
+        params.threadsPerGroup[0] = info.groupSizeX;
+        params.threadsPerGroup[1] = info.groupSizeY;
+        params.threadsPerGroup[2] = info.groupSizeZ;
+    } else {
+        const agfxRenderPipelineCreateInfo& info = executeInfo->renderPipeline->createInfo;
+        params.primitiveType = (uint32_t)agfxPrimitiveTypeToMTL(info.topology);
+        params.objectThreadsPerGroup[0] = info.taskGroupSizeX;
+        params.objectThreadsPerGroup[1] = info.taskGroupSizeY;
+        params.objectThreadsPerGroup[2] = info.taskGroupSizeZ;
+        params.meshThreadsPerGroup[0] = info.meshGroupSizeX;
+        params.meshThreadsPerGroup[1] = info.meshGroupSizeY;
+        params.meshThreadsPerGroup[2] = info.meshGroupSizeZ;
+    }
+
+    if (type == AGFX_INDIRECT_BUNDLE_TYPE_DRAW_INDEXED && executeInfo->indexBuffer) {
+        MTLIndexType indexType = executeInfo->indexBuffer->createInfo.stride == 2 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
+        params.use16BitIndices = (indexType == MTLIndexTypeUInt16) ? 1 : 0;
+        params.indexStride = executeInfo->indexBuffer->createInfo.stride;
+        // Same +1 encoding the direct DrawIndexed path uses (kIRNonIndexedDraw is 0).
+        *(uint16_t*)bundle->uniforms.contents = (uint16_t)(indexType + 1);
+    }
+
+    agfxMetalAllocation paramsAlloc = commandBuffer->drawArgumentAllocator->allocate(sizeof(agfxICBConvertParams));
+    memcpy(paramsAlloc.cpuPointer, &params, sizeof(agfxICBConvertParams));
+
+    agfxMetalAllocation pushConstantsAlloc = commandBuffer->drawUniformAllocator->allocate(sizeof(executeInfo->pushConstants));
+    memcpy(pushConstantsAlloc.cpuPointer, executeInfo->pushConstants, sizeof(executeInfo->pushConstants));
+
+    id<MTL4ArgumentTable> argumentTable = commandBuffer->computeArgumentTable;
+    [argumentTable setAddress:paramsAlloc.gpuAddress atIndex:kAGFXICBParamsBindPoint];
+    [argumentTable setAddress:pushConstantsAlloc.gpuAddress atIndex:kAGFXICBPushConstantsBindPoint];
+    [argumentTable setAddress:bundle->commandsBuffer->buffer.gpuAddress atIndex:kAGFXICBCommandsBindPoint];
+    [argumentTable setAddress:bundle->countBuffer->buffer.gpuAddress atIndex:kAGFXICBCountBindPoint];
+    [argumentTable setAddress:bundle->tlabSlices.gpuAddress atIndex:kAGFXICBTLABBindPoint];
+    [argumentTable setAddress:bundle->drawArgsSlices.gpuAddress atIndex:kAGFXICBDrawArgsBindPoint];
+    [argumentTable setAddress:bundle->execRanges.gpuAddress atIndex:kAGFXICBExecRangeBindPoint];
+    [argumentTable setAddress:bundle->uniforms.gpuAddress atIndex:kAGFXICBUniformsBindPoint];
+    if (executeInfo->indexBuffer) {
+        [argumentTable setAddress:executeInfo->indexBuffer->buffer.gpuAddress atIndex:kAGFXICBIndexBufferBindPoint];
+    }
+    [argumentTable setAddress:bundle->icbContainer.gpuAddress atIndex:kAGFXICBTargetBindPoint];
+
+    static const uint32_t kThreadsPerGroup = 64;
+    uint32_t groupCount = (executeInfo->maxCommandCount + kThreadsPerGroup - 1) / kThreadsPerGroup;
+
+    [computePass->encoder setComputePipelineState:convertPipeline];
+    [computePass->encoder dispatchThreadgroups:MTLSizeMake(groupCount, 1, 1)
+                         threadsPerThreadgroup:MTLSizeMake(kThreadsPerGroup, 1, 1)];
+
+    // The caller's pipeline is no longer bound; force the next Dispatch to rebind rather than
+    // silently dispatching the conversion kernel again.
+    computePass->currentPipeline = nullptr;
+}
+
+void agfxRenderPassExecuteIndirectBundle(agfxRenderPass* renderPass, agfxIndirectBundle* bundle, const agfxIndirectBundleExecuteInfo* executeInfo) {
+    agfxRenderPassSetPipeline(renderPass, executeInfo->renderPipeline);
+
+    [renderPass->encoder executeCommandsInBuffer:bundle->icb
+                                  indirectBuffer:bundle->execRanges.gpuAddress + (uint64_t)executeInfo->countIndex * sizeof(MTLIndirectCommandBufferExecutionRange)];
+}
+
+void agfxComputePassExecuteIndirectBundle(agfxComputePass* computePass, agfxIndirectBundle* bundle, const agfxIndirectBundleExecuteInfo* executeInfo) {
+    agfxComputePassSetPipeline(computePass, executeInfo->computePipeline);
+
+    [computePass->encoder executeCommandsInBuffer:bundle->icb
+                                   indirectBuffer:bundle->execRanges.gpuAddress + (uint64_t)executeInfo->countIndex * sizeof(MTLIndirectCommandBufferExecutionRange)];
 }

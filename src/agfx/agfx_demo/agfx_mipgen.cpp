@@ -66,6 +66,11 @@ void AgfxMipGen::Generate(agfxDevice* device, agfxCommandBuffer* cmdBuffer, agfx
     agfxTextureCreateInfo textureInfo = {};
     agfxTextureGetInfo(texture, &textureInfo);
 
+    // These transitions must agglomerate (the trailing `true`): each mip is written by one pass's
+    // dispatch and read by the next pass's, so the hazard is between encoders, which is exactly what
+    // the Metal backend's pending-barrier flush at the next pass boundary covers. Passing false here
+    // is documented as a no-op on Metal and silently drops the whole chain.
+    //
     // Mip 0 was last written by the uploader's staging copy, which leaves it in
     // COPY_DEST (written-to states don't implicitly decay back to COMMON like
     // read-only promoted states do). Every other mip has never been written, so
@@ -95,8 +100,8 @@ void AgfxMipGen::Generate(agfxDevice* device, agfxCommandBuffer* cmdBuffer, agfx
 
         agfxDeviceMakeResourcesResident(device);
 
-        agfxCommandBufferTextureBarrier(cmdBuffer, texture, srcState, AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, mip, 0, false);
-        agfxCommandBufferTextureBarrier(cmdBuffer, texture, AGFX_RESOURCE_STATE_COMMON, AGFX_RESOURCE_STATE_UNORDERED_ACCESS, mip + 1, 0, false);
+        agfxCommandBufferTextureBarrier(cmdBuffer, texture, srcState, AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, mip, 0, true);
+        agfxCommandBufferTextureBarrier(cmdBuffer, texture, AGFX_RESOURCE_STATE_COMMON, AGFX_RESOURCE_STATE_UNORDERED_ACCESS, mip + 1, 0, true);
 
         agfxComputePass* pass = agfxComputePassBegin(cmdBuffer, "MipGen");
         agfxComputePassSetPipeline(pass, pipeline);
@@ -109,11 +114,10 @@ void AgfxMipGen::Generate(agfxDevice* device, agfxCommandBuffer* cmdBuffer, agfx
         agfxComputePassPushConstants(pass, &pc, sizeof(pc));
 
         agfxComputePassDispatch(pass, (dstWidth + 7) / 8, (dstHeight + 7) / 8, 1);
-        agfxComputePassTextureUAVBarrier(pass, texture);
         agfxComputePassEnd(pass);
 
-        agfxCommandBufferTextureBarrier(cmdBuffer, texture, AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, mip, 0, false);
-        agfxCommandBufferTextureBarrier(cmdBuffer, texture, AGFX_RESOURCE_STATE_UNORDERED_ACCESS, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, mip + 1, 0, false);
+        agfxCommandBufferTextureBarrier(cmdBuffer, texture, AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, mip, 0, true);
+        agfxCommandBufferTextureBarrier(cmdBuffer, texture, AGFX_RESOURCE_STATE_UNORDERED_ACCESS, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, mip + 1, 0, true);
 
         outViews.push_back(srcView);
         outViews.push_back(dstView);

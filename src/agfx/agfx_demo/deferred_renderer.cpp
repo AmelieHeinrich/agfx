@@ -366,6 +366,7 @@ void DeferredRenderer::Init(agfxDevice* device, agfxTextureFormat swapchainForma
 
     agfxRenderPipelineCreateInfo gbufferIndirectInfo = {};
     gbufferIndirectInfo.name = "GBuffer Indirect Pipeline";
+    gbufferIndirectInfo.supportsIndirect = true; // required: this PSO is used from an ICB on Metal
     gbufferIndirectInfo.fillMode = AGFX_FILL_MODE_SOLID;
     gbufferIndirectInfo.cullMode = AGFX_CULL_MODE_NONE; // per-primitive double-sidedness can't vary within one ExecuteIndirect call
     gbufferIndirectInfo.frontFace = AGFX_FRONT_FACE_COUNTER_CLOCKWISE;
@@ -736,7 +737,17 @@ void DeferredRenderer::RenderDebugBoundingBoxes(agfxDevice* device, agfxCommandB
     agfxCommandBufferTextureBarrier(cmdBuffer, hdrTexture, AGFX_RESOURCE_STATE_RENDER_TARGET, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, 0, 0, true);
 }
 
-void DeferredRenderer::CullGBuffer(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const GltfScene& scene, const Camera& camera)
+static GBufferIndirectPushConstants MakeIndirectPushConstants(const GltfScene& scene, agfxBufferView* sceneCBView)
+{
+    GBufferIndirectPushConstants pc = {};
+    pc.vertexBuffer = (uint32_t)agfxBufferViewGetHandle(scene.vertexBufferView);
+    pc.gpuScene = (uint32_t)agfxBufferViewGetHandle(scene.gpuSceneBufferView);
+    pc.textureSampler = (uint32_t)agfxSamplerGetHandle(scene.defaultSampler);
+    pc.sceneCB = (uint32_t)agfxBufferViewGetHandle(sceneCBView);
+    return pc;
+}
+
+void DeferredRenderer::CullGBuffer(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const GltfScene& scene, const Camera& camera, uint32_t frameSlot)
 {
     if (!gbufferIndirectBundle || indirectPrimitiveCount != scene.primitives.size()) return;
 
@@ -760,6 +771,12 @@ void DeferredRenderer::CullGBuffer(agfxDevice* device, agfxCommandBuffer* cmdBuf
     // One compute pass/encoder for the whole culling step: reset the count buffer, transition it
     // to UAV, cull, UAV-barrier the results, then prepare the bundle (no-op on D3D12; real work on
     // Metal's ICB-conversion path).
+    // The bundle is shared by every frame in flight, so the previous frame's GBuffer draws may still
+    // be reading these buffers when this frame's culling pass starts overwriting them. Order the
+    // writes after those reads before touching anything.
+    agfxCommandBufferBufferBarrier(cmdBuffer, commandsBuffer, AGFX_RESOURCE_STATE_INDIRECT_ARGUMENT, AGFX_RESOURCE_STATE_UNORDERED_ACCESS, true);
+    agfxCommandBufferBufferBarrier(cmdBuffer, countBuffer, AGFX_RESOURCE_STATE_INDIRECT_ARGUMENT, AGFX_RESOURCE_STATE_COPY_DEST, true);
+
     agfxComputePass* pass = agfxComputePassBegin(cmdBuffer, "GBuffer Culling");
 
     agfxComputePassCopyBufferToBuffer(pass, indirectCountResetBuffer, countBuffer, 0, 0, sizeof(uint32_t));
@@ -772,10 +789,16 @@ void DeferredRenderer::CullGBuffer(agfxDevice* device, agfxCommandBuffer* cmdBuf
     agfxComputePassBufferUAVBarrier(pass, commandsBuffer);
     agfxComputePassBufferUAVBarrier(pass, countBuffer);
 
+    // Prepare shares agfxIndirectBundleExecuteInfo with Execute because Metal bakes the push
+    // constants into each pre-encoded ICB command at build time; leaving them unset here would
+    // hand the ICB zeroed bindless handles.
+    GBufferIndirectPushConstants preparePC = MakeIndirectPushConstants(scene, gbufferSceneCBView[frameSlot]);
+
     agfxIndirectBundleExecuteInfo prepareInfo = {};
     prepareInfo.countIndex = 0;
     prepareInfo.commandOffset = 0;
     prepareInfo.maxCommandCount = indirectPrimitiveCount;
+    memcpy(prepareInfo.pushConstants, &preparePC, sizeof(preparePC));
     prepareInfo.renderPipeline = gbufferIndirectPipeline;
     prepareInfo.indexBuffer = scene.indexBuffer;
     agfxComputePassPrepareIndirectBundle(pass, gbufferIndirectBundle, &prepareInfo);
@@ -828,11 +851,7 @@ void DeferredRenderer::RenderGBuffer(agfxDevice* device, agfxCommandBuffer* cmdB
     if (gpuDriven) {
         agfxRenderPassSetPipeline(pass, gbufferIndirectPipeline);
 
-        GBufferIndirectPushConstants pc = {};
-        pc.vertexBuffer = (uint32_t)agfxBufferViewGetHandle(scene.vertexBufferView);
-        pc.gpuScene = (uint32_t)agfxBufferViewGetHandle(scene.gpuSceneBufferView);
-        pc.textureSampler = (uint32_t)agfxSamplerGetHandle(scene.defaultSampler);
-        pc.sceneCB = (uint32_t)agfxBufferViewGetHandle(gbufferSceneCBView[frameSlot]);
+        GBufferIndirectPushConstants pc = MakeIndirectPushConstants(scene, gbufferSceneCBView[frameSlot]);
 
         agfxIndirectBundleExecuteInfo executeInfo = {};
         executeInfo.countIndex = 0;

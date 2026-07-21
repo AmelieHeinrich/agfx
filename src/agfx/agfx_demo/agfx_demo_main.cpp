@@ -307,7 +307,7 @@ int main()
 
             if (renderer.gpuDrivenSettings.enabled) {
                 profiler.BeginScope(commandBuffer, "Culling");
-                renderer.CullGBuffer(device, commandBuffer, scene, camera);
+                renderer.CullGBuffer(device, commandBuffer, scene, camera, frameSlot);
                 profiler.EndScope(commandBuffer);
             }
 

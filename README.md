@@ -2,7 +2,7 @@
 
 ![](.github/image.png)
 
-AGFX is a very small (<6000LOC) wrapper over D3D12 and Metal 4, designed to make it easier for indie developers to ship game on multiple platforms. It's MIT licensed.
+AGFX is a small (<10k LOC) wrapper over D3D12 and Metal 4, designed to make it easier for indie developers to ship game on multiple platforms. It's MIT licensed.
 
 It is designed to be bindless first, which is pretty reasonable considering any GPU that isn't older than the library's author should support it (I was born in 2006!).
 
@@ -79,6 +79,7 @@ On Windows:
 - agfx_shader: dxcompiler.lib
 
 ## Changelogs
+- v1.2.0: Multi draw indirect update
 - v1.1.0: Raytracing update
 - v1.0.0: Base Metal4/D3D12 backends with basic features, missing raytracing/draw indirect. Fully usable for a video game.
 

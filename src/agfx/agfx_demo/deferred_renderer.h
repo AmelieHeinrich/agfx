@@ -68,7 +68,7 @@ public:
     // out from RenderGBuffer so it can get its own GPU profiler scope; call before RenderGBuffer
     // whenever gpuDrivenSettings.enabled is true, and only then - RenderGBuffer detects readiness
     // via gbufferIndirectBundle/indirectPrimitiveCount and falls back to the CPU path otherwise.
-    void CullGBuffer(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const GltfScene& scene, const Camera& camera);
+    void CullGBuffer(agfxDevice* device, agfxCommandBuffer* cmdBuffer, const GltfScene& scene, const Camera& camera, uint32_t frameSlot);
     void SetupIndirectBundle(agfxDevice* device, uint32_t primitiveCount);
     // Builds the debug AABB wireframe vertex buffer from scene.primitives' bounds. Call once after
     // the scene is loaded (bounds are static). Safe to call again if the scene changes.
