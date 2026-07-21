@@ -4,7 +4,7 @@
 ![](.github/ez.png)
 ![](.github/tests.png)
 
-AGFX is a small (<10k LOC) wrapper over D3D12 and Metal 4, designed to make it easier for indie developers to ship game on multiple platforms. It's MIT licensed.
+AGFX is a small (<10k LOC) wrapper over D3D12 and Metal 4, designed to make it easier for indie developers to ship games on multiple platforms. It's MIT licensed.
 
 It is designed to be bindless first, which is pretty reasonable considering any GPU that isn't older than the library's author should support it (I was born in 2006!).
 
@@ -59,6 +59,13 @@ In this repository you can find a few different folders:
 - agfx_shader_cli: A CLI to compile AGFX shaders
 - agfx_tests: An exhaustive RHI test suite 
 - data/shaders: Helpful HLSL header include, and shaders for agfx_imgui and the demo app
+
+## Missing features (unplanned, PRs open)
+
+- Vulkan backend
+- Sparse resources
+- Resource aliasing
+- GPU heaps
 
 ## AI Notice
 

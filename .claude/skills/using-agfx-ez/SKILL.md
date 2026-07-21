@@ -9,13 +9,19 @@ description: ALWAYS use when writing or modifying code against agfx::ez (agfx_ez
 
 `agfx::ez` (`src/agfx/agfx/agfx_ez.hpp`) is a header-only, D3D11/OpenGL-style immediate-context layer built entirely on top of raw AGFX (`agfx.hpp`/`agfx.h`). It owns its own frame loop, caches render pipelines and resource views, does one-call texture/buffer creation with synchronous upload, provides a ring-buffered per-frame dynamic constant allocator, and a 128-byte bindless push-constant builder (`ShaderBindings`). The entire point is to remove the ceremony raw AGFX requires for simple cases (frame pacing, render-target/pass boilerplate, pipeline caching, upload staging) while still producing real AGFX resources underneath — `Texture2D::Raw()`/`Buffer::Raw()`/`Context::GetDevice()` give an escape hatch back to raw AGFX whenever ez's simplifications don't fit.
 
-**This is convenience, not automatic hazard tracking.** AGFX is fully bindless — a shader can read a resource through a handle at any point, with no host-visible hook to observe that. `Context::TransitionTexture`/`TransitionBuffer` (and the automatic transitions inside `SetRenderTargets`) only track the last state *the ez layer itself* moved a resource into via its own calls. They do **not**: see inside shader bindless reads, track resources created directly through raw `agfx.hpp`/`agfx.h` (mixing raw and ez creation for the same resource silently defeats tracking for it), operate at subresource (mip/layer) granularity, or infer intra-pass UAV read/write hazards (use the re-exposed `TextureUAVBarrier`/`BufferUAVBarrier` on `agfx::ComputePass` for that, same as raw AGFX — see `agfx-synchronization`). Keep this scope in mind before assuming ez has "solved" synchronization.
+**This is convenience, not automatic hazard tracking.** AGFX is fully bindless — a shader can read a resource through a handle at any point, with no host-visible hook to observe that. `Context::TransitionTexture`/`TransitionBuffer` (and the automatic transitions inside `SetRenderTargets`) only track the last state *the ez layer itself* moved a resource into via its own calls. They do **not**: see inside shader bindless reads, track resources created directly through raw `agfx.hpp`/`agfx.h` (mixing raw and ez creation for the same resource silently defeats tracking for it), or infer intra-pass UAV read/write hazards (use the re-exposed `TextureUAVBarrier`/`BufferUAVBarrier` on `agfx::ComputePass` for that, same as raw AGFX — see `agfx-synchronization`). Keep this scope in mind before assuming ez has "solved" synchronization.
+
+Tracking *is* subresource-granular: `ResourceStateTracker` stores one state while every (mip, layer) agrees and splits into per-subresource states on the first subresource transition, re-collapsing when they agree again. So `TransitionTexture(tex, state, mip, layer)` and per-mip render targets are expressible — mip-chain generation works, and whole-resource transitions still cost a single barrier in the common case.
+
+**Coverage today: ez does essentially everything raw AGFX does**, with these known exclusions — multi-queue (one graphics queue, one command buffer per frame slot), per-attachment blend state (`PipelineDesc` blend is uniform across color attachments), compute-pass sugar (open a raw `agfx::ComputePass` via `GetCurrentCommandBuffer()`), and async/batched upload (creation uploads block). Everything else — all four texture types, mip/layer-addressed render targets and views, copies, mesh shading, indirect bundles, ray tracing, headless operation — has an ez path. Don't recommend dropping to raw AGFX for anything outside that exclusion list without checking the header first.
 
 ## Ownership
 
 **Owns:**
 - `agfx::ez::Context`: construction (`ContextCreateInfo`), the `BeginFrame`/`EndFrame` (or RAII `Frame` guard) loop, resize/HDR toggle, immediate-mode render calls, one-call resource creation, per-frame dynamic constants, the explicit-transition escape hatch, and raw-AGFX object access
-- `agfx::ez::Texture2D`/`agfx::ez::Buffer`: lazily-created cached views (SRV/UAV/RTV, and per-`agfxBufferViewType` views respectively) and their state tracker
+- `agfx::ez::Texture2D`/`Texture2DArray`/`Texture3D`/`TextureCube` (all sharing `detail::TextureBase`) and `agfx::ez::Buffer`: lazily-created cached views (SRV/UAV keyed on the full mip/layer subrange, RTV keyed on (mip, layer), and per-`agfxBufferViewType` buffer views) and their subresource state tracker
+- `RenderTargetBinding`: naming a mip and array layer per attachment in `SetRenderTargets`
+- Headless contexts (`windowHandle == nullptr`), and which entry points are unavailable in one
 - `agfx::ez::ShaderBindings`: the 128-byte push-constant builder and its `BindTexture`/`BindBuffer`/`BindSampler`/`Write` calls
 - `agfx::ez::PipelineDesc` + the internal pipeline cache: the simplified render-pipeline description and when a new `agfx::RenderPipeline` gets built vs. reused
 - `agfx::ez::IndirectBundle`/`AccelerationStructure` **as ez objects**: their state tracking, `Context::CreateIndirectBundle`/`ExecuteIndirectBundle`/`TransitionIndirectBundle`, and the raw-compute-pass escape hatch they require
@@ -82,24 +88,55 @@ ctx.SetBackBufferRenderTarget(AGFX_LOAD_OPERATION_CLEAR, myClearColor);
 
 `SetRenderTargets`/`SetBackBufferRenderTarget` each implicitly end any previously active render pass and transition every passed `Texture2D`/depth target into the correct state first — this is exactly the scope of ez's automatic tracking described in Overview. Call `EndActivePass()` before starting a compute pass on the same command buffer (`ctx.GetCurrentCommandBuffer().BeginComputePass(...)`), since a render pass and compute pass can't be active simultaneously.
 
+Attachments can name a mip and layer, which is what makes mip chains and cube faces expressible. The pass dimensions come from the *bound subresource*, so rendering into mip N gets an N-sized pass:
+
+```cpp
+ctx.SetRenderTargets({{cubemap, /*mip*/ 0, /*layer*/ face}});          // one cube face (+X,-X,+Y,-Y,+Z,-Z)
+ctx.SetRenderTargets({{mipChain, /*mip*/ n}});                          // one level of a mip chain
+```
+
+Only the bound subresource is transitioned — the other mips/layers keep their state, so mip N-1 can sit in a shader-read state while mip N is the render target. A 3D texture's depth slices are *not* layers and cannot be bound this way; address them through an `agfxTextureRegion`'s z/depth in a copy or upload.
+
+### Viewport and scissor
+
+`SetViewportScissor(x, y, w, h)` sets both to the same rect — the common case. When they must disagree (squeezing the image into a sub-rect is a viewport job; cropping it is a scissor job), call `SetViewport` and `SetScissor` separately.
+
 ### One-call resource creation
 
 ```cpp
 agfx::ez::Texture2D albedo = ctx.CreateTexture2D(width, height, AGFX_TEXTURE_FORMAT_RGBA8_UNORM,
                                                   AGFX_TEXTURE_USAGE_SAMPLED, pixelData, bytesPerRow);
+agfx::ez::Texture2DArray layers = ctx.CreateTexture2DArray(w, h, arrayLayers, format, usage, mipLevels);
+agfx::ez::Texture3D volume = ctx.CreateTexture3D(w, h, depth, format, usage);
+agfx::ez::TextureCube cube = ctx.CreateTextureCube(size, format, usage);
 agfx::ez::Buffer vbo = ctx.CreateVertexBuffer(vertexData, vertexDataSize, sizeof(Vertex));
 agfx::ez::Buffer ibo = ctx.CreateIndexBuffer(indexData, indexDataSize);
 agfx::ez::Buffer sceneBuf = ctx.CreateStructuredBuffer(sceneData, sceneDataSize, sizeof(SceneVertex));
 ```
 
-These upload synchronously (map a staging buffer, copy, submit, wait) and call `agfxDeviceMakeResourcesResident` before returning — safe to call outside the frame loop (asset loading), but each call is a blocking round trip to the GPU, so batch asset loading rather than calling these per-frame or in a tight loop. For a render-target-only or storage-only texture (no initial pixel data), pass `pixels = nullptr`; residency is still established.
+These upload synchronously (map a staging buffer, copy, submit, wait) and call `agfxDeviceMakeResourcesResident` before returning — safe to call outside the frame loop (asset loading), but each call is a blocking round trip to the GPU, so batch asset loading rather than calling these per-frame or in a tight loop. For a render-target-only or storage-only texture (no initial pixel data), pass `pixels = nullptr`; residency is still established. `AGFX_TEXTURE_USAGE_SAMPLED` is force-ORed into every texture's usage, so it never needs passing explicitly.
+
+`CreateTexture2D`'s `pixels` only seeds mip 0 of layer 0. `UploadTexture(dst, region, mipLevel, layer, data, dataSize, bytesPerRow, bytesPerImage)` is the general form — use it to seed lower mips, array layers, cube faces, and 3D slices (3D slices via `region.z`/`region.depth`, since a 3D texture has no layers). It blocks and establishes residency, same as creation.
+
+Uploaded resources are deliberately left in `AGFX_RESOURCE_STATE_COMMON`, and the tracker agrees. Don't "fix" this with a post-upload barrier: COMMON's producer stages are 0 like every read state's, so it changes nothing on D3D12, and on Metal4 a 0-producer/non-zero-consumer pair yields `barrierAfterQueueStages:0`, which Metal's validation layer rejects.
+
+### Copies (inside the frame loop)
+
+```cpp
+ctx.CopyTextureToTexture(src, dst, region, mipLevel, layer);
+ctx.CopyBufferToTexture(src, dst, region, mipLevel, layer, bytesPerRow);
+ctx.CopyTextureToBuffer(src, dst, bufferOffset, region, mipLevel, layer, bytesPerRow);
+```
+
+Each opens and closes its own scoped compute pass on the frame's command buffer, so call them between `BeginFrame`/`EndFrame` and after `EndActivePass()` if a render pass is open. **These do not transition for you** — issue the `COPY_SOURCE`/`COPY_DEST` transitions yourself via `TransitionTexture`/`TransitionBuffer`, matching the rest of ez's explicit barrier model.
 
 ### Views: lazily created, cached, not re-created per frame
 
 ```cpp
-agfx::TextureView& srv = albedo.SRV(); // created on first call, cached thereafter
-agfx::TextureView& uav = albedo.UAV(); // requires AGFX_TEXTURE_USAGE_STORAGE at creation, or this asserts
-agfx::RenderTarget& rtv = albedo.RTV(); // requires a COLOR_ATTACHMENT or DEPTH_STENCIL_ATTACHMENT usage bit
+agfx::TextureView& srv = albedo.SRV(); // whole resource by default; created on first call, cached thereafter
+agfx::TextureView& mipSrv = albedo.SRV(baseMip, mipCount, baseLayer, layerCount); // any subrange
+agfx::TextureView& uav = albedo.UAV(mip, 1); // single-mip UAV, what mip-chain generation needs
+agfx::RenderTarget& rtv = albedo.RTV(mipLevel, arrayLayer); // COLOR_ATTACHMENT or DEPTH_STENCIL_ATTACHMENT bit required
 agfx::BufferView& structured = sceneBuf.View(AGFX_BUFFER_VIEW_TYPE_STRUCTURED);
 ```
 
@@ -174,8 +211,11 @@ Two requirements ez cannot check for you, both silent-on-D3D12 / fatal-on-Metal:
 ### Explicit transitions (the escape hatch)
 
 ```cpp
-ctx.TransitionTexture(shadowMap, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE); // no-op if already in that state
+ctx.TransitionTexture(shadowMap, AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE); // whole resource; no-op if already there
+ctx.TransitionTexture(chain, AGFX_RESOURCE_STATE_UNORDERED_ACCESS, mip, layer); // one subresource
 ```
+
+Whole-resource transitions after a split are still correct: the subresources are re-grouped by current state and one barrier is emitted per distinct old state, since a barrier can only name one. `State()` on a texture asserts while the tracker is split — use `StateAt(mip, layer)` in code that transitions subresources individually.
 
 Use this when a resource needs a state ez's automatic `SetRenderTargets` tracking doesn't cover — e.g. transitioning a texture into a shader-readable state before binding it via `ShaderBindings::BindTexture`, since ez only auto-transitions render/depth targets on `SetRenderTargets`, not arbitrary sampled textures. Remember the tracking-scope caveat from Overview: this only works correctly if the resource has never been touched by raw AGFX calls outside ez.
 
@@ -187,6 +227,23 @@ ctx.SetHDR(wantHDR, vsyncSetting);     // drains GPU internally, destroys+recrea
 ```
 
 Both already drain the GPU — don't add a manual drain around these calls. After either, any `PipelineDesc` bound against the back buffer format is still fine (the cache keys on bound formats, and `SetBackBufferRenderTarget` re-queries `GetSwapChainFormat()` each call), but off-screen render targets sized to match the window need to be resized/recreated by the caller — ez doesn't own those.
+
+### Ray tracing
+
+```cpp
+if (ctx.SupportsRayTracing()) {
+    ez::AccelerationStructure blas = ctx.CreateBottomLevel(vbo, vertexCount, vertexOffset,
+                                                           ibo, indexCount, indexOffset);
+    ez::AccelerationStructure tlas = ctx.CreateTopLevel(instances, instanceCount);
+    bindings.Write(tlas.Bind()); // bindless handle to trace against
+}
+```
+
+Both calls create *and* synchronously build in one go, hiding scratch allocation, residency, and the AS→AS build barrier. `vertexOffset`/`indexOffset` are element indices (scaled by the buffer's stride internally), and the first vertex attribute must be `float3` position. On a non-RT device they return an invalid structure rather than failing — `Valid()` is false and `Bind()` gives 0 — so always guard with `SupportsRayTracing()` instead of relying on that. Instance transforms are row-major 3x4, and a referenced BLAS must already be built before `CreateTopLevel`. Tracing itself is inline `RayQuery` HLSL — see **agfx-raytracing**.
+
+### Headless contexts
+
+Leave `windowHandle` null in `ContextCreateInfo` and no swap chain is created — the frame loop, resource creation, passes, copies and readback all work normally. `IsHeadless()` reports it, and `SetBackBufferRenderTarget`, `Resize`, `SetHDR`, and `GetSwapChainFormat` all assert if called. This is the shape for offline bakers, test harnesses, and render-to-file tools: render into an ez texture, `CopyTextureToBuffer`, drain, read back.
 
 ### Dropping to raw AGFX
 
