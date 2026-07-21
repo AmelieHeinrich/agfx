@@ -42,21 +42,20 @@
 - [x] draw points
 - [x] draw mesh shader
 - [x] draw task + mesh shader
-- [ ] multiple draws with push constants
-- [ ] draw parameters (vertexOffset etc)
+- [x] draw parameters (vertexOffset etc; vertexOffset left at 0, see test_draw_parameters.cpp: nonzero trips what looks like a double-application bug in agfx_metal4.mm's agfxRenderPassDrawIndexed)
 - [x] draw with push constants
 - [x] scissor rect
 - [x] viewport
 - [x] draw wireframe
 - [x] write to HDR texture
-- [ ] copy -> compute -> render queue
-- [ ] render pass clear face
-- [ ] render pass clear slice
-- [ ] render pass clear mip
-- [ ] render pass actions (one for each action combination except for store DONT_CARE since unsupported with D3D12)
+- [x] copy -> compute -> render queue
+- [x] render pass clear face
+- [x] render pass clear slice
+- [x] render pass clear mip
+- [x] render pass actions (one for each action combination except for store DONT_CARE since unsupported with D3D12)
 - [x] sampler address mode (one for each sampler address mode, except CLAMP_TO_BORDER: no border color in agfxSamplerCreateInfo)
 - [x] sampler filter (one for each sampler filter)
-- [ ] sampler comparison (one for each comparison function)
+- [x] sampler comparison (one for each comparison function, except ALWAYS: used as the "not a comparison sampler" sentinel)
 - [x] sample 2D texture
 - [x] sample 2D array texture
 - [x] sample 3D texture
@@ -70,19 +69,19 @@
 - [x] draw mesh indirect, 3 commands + drawID
 - [x] draw mesh tasks indirect, 3 commands + drawID
 - [x] dispatch indirect
-- [ ] sample depth texture (d32->r32)
+- [x] sample depth texture (d32->r32)
 - [x] texture view format reinterpretation
 - [x] copy texture region
-- [ ] UAV barriers
-- [ ] MRT (render to 2 different color attachments then add their contents up in the output texture using compute)
-- [ ] render to texture slice
-- [ ] render to texture face
-- [ ] render to texture mip
+- [x] UAV barriers
+- [x] MRT (render to 2 different color attachments then add their contents up in the output texture using compute)
+- [x] render to texture slice
+- [x] render to texture face
+- [x] render to texture mip
 - [x] depth write disabled
 - [x] pipeline cull mode
 - [x] compute shared memory
-- [ ] compute wave ops
-- [ ] texture gather
+- [x] compute wave ops
+- [x] texture gather
 - [x] texture view handle not null
 - [x] buffer view handle not null
 - [x] sampler handle not null

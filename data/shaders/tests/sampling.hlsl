@@ -147,3 +147,31 @@ void main_sample_cube_cs(uint3 id : SV_DispatchThreadID)
 
     dst.Store(int2(id.x, id.y + id.z * g_Constants.height), texel);
 }
+
+// Gather: the one sampled read that returns four texels at once rather than a filtered blend of
+// them. The test that drives this aims the sample point at the exact corner shared by four texels,
+// so all four are named unambiguously, and writes the four gathered red values into the
+// destination's RGBA channels. That turns the *order* of Gather's results into something the golden
+// and the host-side expectation can both pin down -- ordering is the part of Gather most likely to
+// differ between backends, and a blend-based test could not see it at all.
+//
+// uvScale/uvOffset are ignored here: the sample point has to sit exactly on a texel corner for the
+// four results to be well defined, so the coordinate is computed directly rather than transformed.
+[numthreads(8, 8, 1)]
+void main_gather_cs(uint3 id : SV_DispatchThreadID)
+{
+    AGFXTexture2D<float4> src = AGFXTexture2D<float4>::Create(g_Constants.source);
+    AGFXSampler smp = AGFXSampler::Create(g_Constants.samplerId);
+    AGFXRWTexture2D<float4> dst = AGFXRWTexture2D<float4>::Create(g_Constants.destination);
+
+    if (id.x >= g_Constants.width || id.y >= g_Constants.height) {
+        return;
+    }
+
+    // The corner between texels (x, y) and (x+1, y+1). Texel centers sit at (i + 0.5) / size, so
+    // the corner between i and i+1 is (i + 1) / size exactly.
+    const float2 uv = float2(float(id.x) + 1.0f, float(id.y) + 1.0f) /
+                      float2(g_Constants.width, g_Constants.height);
+
+    dst.Store(int2(id.xy), src.GatherRed(smp, uv));
+}

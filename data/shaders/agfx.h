@@ -99,6 +99,15 @@ class AGFXTexture2D
     T    SampleGrad(AGFXSampler s, float2 location, float2 ddx, float2 ddy)         { return texture.SampleGrad(s.state, location, ddx, ddy); }
     float SampleCmp(AGFXComparisonSampler s, float2 location, float cmp)             { return texture.SampleCmp(s.state, location, cmp); }
     float SampleCmpLevelZero(AGFXComparisonSampler s, float2 location, float cmp)     { return texture.SampleCmpLevelZero(s.state, location, cmp); }
+    // Gather returns one channel from each of the four texels that a bilinear tap would blend,
+    // ordered counter-clockwise from the lower-left: (-,+), (+,+), (+,-), (-,-) relative to the
+    // sample point. Unlike Sample it needs no LOD argument -- gather is always mip 0 -- so it is
+    // usable from a compute shader as-is.
+    float4 Gather(AGFXSampler s, float2 location)                                    { return texture.Gather(s.state, location); }
+    float4 GatherRed(AGFXSampler s, float2 location)                                 { return texture.GatherRed(s.state, location); }
+    float4 GatherGreen(AGFXSampler s, float2 location)                               { return texture.GatherGreen(s.state, location); }
+    float4 GatherBlue(AGFXSampler s, float2 location)                                { return texture.GatherBlue(s.state, location); }
+    float4 GatherAlpha(AGFXSampler s, float2 location)                               { return texture.GatherAlpha(s.state, location); }
     void GetDimensions(uint mip, out uint width, out uint height, out uint numLevels)                 { texture.GetDimensions(mip, width, height, numLevels); }
 };
 
