@@ -1,7 +1,7 @@
 # Lists of tests to do
 - [x] buffer view byte address
 - [x] buffer view constant
-- [ ] buffer view rw byte address
+- [x] buffer view rw byte address
 - [x] buffer view rw structured
 - [x] buffer view structured
 - [x] compute buffer atomics
@@ -14,11 +14,11 @@
 - [x] upload readback roundtrip
 - [ ] compute multi dispatch texture
 - [x] compute texture load 2D
-- [ ] compute texture load 2D array
-- [ ] compute texture load 3D
+- [x] compute texture load 2D array
+- [x] compute texture load 3D
 - [x] compute texture write
-- [ ] compute texture write 2D array
-- [ ] compute texture write 3D
+- [x] compute texture write 2D array
+- [x] compute texture write 3D
 - [x] copy buffer to texture mip
 - [x] copy buffer to texture region
 - [x] copy buffer to texture
@@ -35,8 +35,8 @@
 - [ ] draw depth clamp
 - [ ] draw depth test (one for each depth test func)
 - [ ] draw fragment discard
-- [ ] draw indexed u16
-- [ ] draw indexed
+- [x] draw indexed u16
+- [x] draw indexed
 - [ ] draw lines
 - [ ] draw lines indexed
 - [ ] draw points
@@ -45,8 +45,8 @@
 - [ ] multiple draws with push constants
 - [ ] draw parameters (vertexOffset etc)
 - [ ] draw with push constants
-- [ ] scissor rect
-- [ ] viewport
+- [x] scissor rect
+- [x] viewport
 - [ ] draw wireframe
 - [x] write to HDR texture
 - [ ] copy -> compute -> render queue
@@ -57,8 +57,8 @@
 - [ ] sampler address mode (one for each sampler address mode)
 - [ ] sampler filter (one for each sampler filter)
 - [ ] sampler comparison (one for each comparison function)
-- [ ] sample 2D texture
-- [ ] sample 2D array texture
+- [x] sample 2D texture
+- [x] sample 2D array texture
 - [ ] sample 3D texture
 - [ ] sample cube texture
 - [ ] draw indirect, one command

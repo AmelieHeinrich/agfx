@@ -133,6 +133,30 @@ namespace agfxtest
                                     agfxResourceState currentState, uint32_t mipLevel, uint32_t layer,
                                     Image& outImage);
 
+    /// @brief Reads every array layer of a 2D array texture and stacks them top to bottom into one
+    /// (width, height * layerCount) Image, so a layered result can be held by a single golden PNG.
+    /// Slices are stacked in index order, which means a backend that swaps or collapses layers
+    /// shows up as a reordered or repeated band rather than as a subtly different image.
+    bool ReadbackTexture2DArrayStack(agfxDevice* device, agfxCommandQueue* queue, agfxTexture* texture,
+                                     uint32_t width, uint32_t height, uint32_t layerCount,
+                                     agfxTextureFormat format, agfxResourceState currentState,
+                                     Image& outImage);
+
+    /// @brief As ReadbackTexture2DArrayStack, but for a 3D texture's depth slices.
+    bool ReadbackTexture3DStack(agfxDevice* device, agfxCommandQueue* queue, agfxTexture* texture,
+                                uint32_t width, uint32_t height, uint32_t depth,
+                                agfxTextureFormat format, agfxResourceState currentState,
+                                Image& outImage);
+
+    /// @brief Reads one depth slice out of a 3D texture. Distinct from ReadbackTextureSubresource
+    /// because a 3D texture's slices are not array layers: they are addressed through the copy
+    /// region's z origin, with the layer left at 0. Passing a slice index as `layer` instead would
+    /// silently read slice 0 on both backends.
+    bool ReadbackTexture3DSlice(agfxDevice* device, agfxCommandQueue* queue, agfxTexture* texture,
+                                uint32_t width, uint32_t height, agfxTextureFormat format,
+                                agfxResourceState currentState, uint32_t mipLevel, uint32_t z,
+                                Image& outImage);
+
     /// @brief Copies a 2D texture's mip 0 into a host Image, via a readback staging buffer.
     /// Only RGBA8_UNORM and RGBA32F are supported — the two formats the test suite renders to.
     /// `currentState` is the texture's state on entry; it is restored before returning.

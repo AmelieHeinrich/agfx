@@ -4,7 +4,7 @@
  * @ Copyright: Copyright (c) 2026 Amélie Heinrich. All rights reserved.
  */
 
-// TESTS_TODO: "buffer view byte address".
+// TESTS_TODO: "buffer view byte address" and "buffer view rw byte address".
 //
 // Drives data/shaders/tests/byte_address.hlsl in two dispatches: the first writes an offset-derived
 // pattern through a writeable raw (byte address) view, the second reads it back through a read-only

@@ -295,10 +295,14 @@ namespace agfxtest
                                           0, 0, outImage);
     }
 
-    bool ReadbackTextureSubresource(agfxDevice* device, agfxCommandQueue* queue, agfxTexture* texture,
+    /// @brief The shared body behind ReadbackTextureSubresource and ReadbackTexture3DSlice. Array
+    /// layers and 3D depth slices reach the same texel through different parameters — `layer` for
+    /// the former, the region's z origin for the latter — so both are plumbed through here and the
+    /// two public wrappers pick the one that applies.
+    static bool ReadbackTextureImpl(agfxDevice* device, agfxCommandQueue* queue, agfxTexture* texture,
                                     uint32_t width, uint32_t height, agfxTextureFormat format,
                                     agfxResourceState currentState, uint32_t mipLevel, uint32_t layer,
-                                    Image& outImage)
+                                    uint32_t z, Image& outImage)
     {
         const uint32_t bpp = BytesPerPixel(format);
         if (!device || !queue || !texture || width == 0 || height == 0 || bpp == 0) {
@@ -318,6 +322,7 @@ namespace agfxtest
         agfxDeviceMakeResourcesResident(device);
 
         agfxTextureRegion region{};
+        region.z = z; // 0 for everything but a 3D texture's depth slices.
         region.width = width;
         region.height = height;
         region.depth = 1;
@@ -355,5 +360,74 @@ namespace agfxtest
         agfxBufferUnmap(staging);
         agfxBufferDestroy(device, staging);
         return true;
+    }
+
+    bool ReadbackTextureSubresource(agfxDevice* device, agfxCommandQueue* queue, agfxTexture* texture,
+                                    uint32_t width, uint32_t height, agfxTextureFormat format,
+                                    agfxResourceState currentState, uint32_t mipLevel, uint32_t layer,
+                                    Image& outImage)
+    {
+        return ReadbackTextureImpl(device, queue, texture, width, height, format, currentState,
+                                   mipLevel, layer, /*z*/ 0, outImage);
+    }
+
+    /// @brief Reads `sliceCount` slices one at a time and concatenates them vertically. `readSlice`
+    /// is what distinguishes the array case from the 3D case.
+    template<typename ReadSliceFn>
+    static bool ReadbackStack(uint32_t width, uint32_t height, uint32_t sliceCount, Image& outImage,
+                              ReadSliceFn&& readSlice)
+    {
+        if (width == 0 || height == 0 || sliceCount == 0) {
+            return false;
+        }
+
+        outImage.width = width;
+        outImage.height = height * sliceCount;
+        outImage.pixels.assign(size_t(outImage.width) * outImage.height * 4, 0.0f);
+
+        const size_t floatsPerSlice = size_t(width) * height * 4;
+        for (uint32_t slice = 0; slice < sliceCount; ++slice) {
+            Image sliceImage;
+            if (!readSlice(slice, sliceImage) || !sliceImage.Valid()) {
+                return false;
+            }
+            if (sliceImage.width != width || sliceImage.height != height) {
+                return false;
+            }
+            memcpy(outImage.pixels.data() + floatsPerSlice * slice, sliceImage.pixels.data(),
+                   floatsPerSlice * sizeof(float));
+        }
+        return true;
+    }
+
+    bool ReadbackTexture2DArrayStack(agfxDevice* device, agfxCommandQueue* queue, agfxTexture* texture,
+                                     uint32_t width, uint32_t height, uint32_t layerCount,
+                                     agfxTextureFormat format, agfxResourceState currentState,
+                                     Image& outImage)
+    {
+        return ReadbackStack(width, height, layerCount, outImage, [&](uint32_t layer, Image& slice) {
+            return ReadbackTextureSubresource(device, queue, texture, width, height, format,
+                                              currentState, /*mipLevel*/ 0, layer, slice);
+        });
+    }
+
+    bool ReadbackTexture3DStack(agfxDevice* device, agfxCommandQueue* queue, agfxTexture* texture,
+                                uint32_t width, uint32_t height, uint32_t depth,
+                                agfxTextureFormat format, agfxResourceState currentState,
+                                Image& outImage)
+    {
+        return ReadbackStack(width, height, depth, outImage, [&](uint32_t z, Image& slice) {
+            return ReadbackTexture3DSlice(device, queue, texture, width, height, format, currentState,
+                                          /*mipLevel*/ 0, z, slice);
+        });
+    }
+
+    bool ReadbackTexture3DSlice(agfxDevice* device, agfxCommandQueue* queue, agfxTexture* texture,
+                                uint32_t width, uint32_t height, agfxTextureFormat format,
+                                agfxResourceState currentState, uint32_t mipLevel, uint32_t z,
+                                Image& outImage)
+    {
+        return ReadbackTextureImpl(device, queue, texture, width, height, format, currentState,
+                                   mipLevel, /*layer*/ 0, z, outImage);
     }
 } // namespace agfxtest
