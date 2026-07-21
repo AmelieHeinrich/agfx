@@ -268,14 +268,15 @@ namespace agfxtest
                 drawConstants.source = (uint32_t)agfxTextureViewGetHandle(srv);
                 drawConstants.samplerId = (uint32_t)agfxSamplerGetHandle(sampler);
 
-                // 1. Graphics queue: put the textures into the producer's states.
+                // 1. Graphics queue: put the textures into the producer's states. A D3D12 copy queue
+                //    requires a resource to be in COMMON when it crosses over from another queue
+                //    type, so the copy producer's source/destination are left in COMMON here and
+                //    picked up via the copy queue's implicit "assumed at first use" state instead.
                 agfxCommandBufferBegin(preCmd);
-                if (isCopy) {
-                    agfxCommandBufferTextureBarrier(preCmd, source, AGFX_RESOURCE_STATE_COMMON,
-                                                    AGFX_RESOURCE_STATE_COPY_SOURCE, 0, 0, 0);
+                if (!isCopy) {
+                    agfxCommandBufferTextureBarrier(preCmd, shared, AGFX_RESOURCE_STATE_COMMON,
+                                                    ProducerState(producer), 0, 0, 0);
                 }
-                agfxCommandBufferTextureBarrier(preCmd, shared, AGFX_RESOURCE_STATE_COMMON,
-                                                ProducerState(producer), 0, 0, 0);
                 agfxCommandBufferEnd(preCmd);
                 agfxCommandQueueSubmit(graphicsQueue, &preCmd, 1);
                 agfxCommandQueueSignal(graphicsQueue, fence, 1);
@@ -308,7 +309,11 @@ namespace agfxtest
                 //    the whole test — without it the draw races the producer.
                 agfxCommandQueueWait(graphicsQueue, fence, 2);
                 agfxCommandBufferBegin(drawCmd);
-                agfxCommandBufferTextureBarrier(drawCmd, shared, ProducerState(producer),
+                // Symmetric with the pre-producer transition: the copy queue's work also has to
+                // decay back to COMMON crossing back to the graphics queue, so that's the "before"
+                // state here rather than ProducerState for the copy case.
+                agfxCommandBufferTextureBarrier(drawCmd, shared,
+                                                isCopy ? AGFX_RESOURCE_STATE_COMMON : ProducerState(producer),
                                                 AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, 0, 0, 0);
                 agfxCommandBufferTextureBarrier(drawCmd, target, AGFX_RESOURCE_STATE_COMMON,
                                                 AGFX_RESOURCE_STATE_RENDER_TARGET, 0, 0, 0);
@@ -456,14 +461,15 @@ namespace agfxtest
             drawConstants.source = (uint32_t)srv.GetHandle();
             drawConstants.samplerId = (uint32_t)sampler.GetHandle();
 
-            // 1. Graphics queue: into the producer's states.
+            // 1. Graphics queue: into the producer's states. A D3D12 copy queue requires a resource
+            //    be in COMMON crossing over from another queue type, so the copy producer's
+            //    source/destination are left in COMMON and picked up via the copy queue's implicit
+            //    "assumed at first use" state instead.
             preCmd.Begin();
-            if (isCopy) {
-                preCmd.TextureBarrier(source, AGFX_RESOURCE_STATE_COMMON, AGFX_RESOURCE_STATE_COPY_SOURCE,
+            if (!isCopy) {
+                preCmd.TextureBarrier(shared, AGFX_RESOURCE_STATE_COMMON, ProducerState(producer),
                                       AGFX_SUBRESOURCE_ALL_MIPS, AGFX_SUBRESOURCE_ALL_LAYERS, false);
             }
-            preCmd.TextureBarrier(shared, AGFX_RESOURCE_STATE_COMMON, ProducerState(producer),
-                                  AGFX_SUBRESOURCE_ALL_MIPS, AGFX_SUBRESOURCE_ALL_LAYERS, false);
             preCmd.End();
             graphicsQueue.Submit(preCmd);
             graphicsQueue.Signal(fence, 1);
@@ -493,7 +499,8 @@ namespace agfxtest
             // 3. Graphics queue: waits for the producer, then samples its result.
             graphicsQueue.Wait(fence, 2);
             drawCmd.Begin();
-            drawCmd.TextureBarrier(shared, ProducerState(producer), AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            drawCmd.TextureBarrier(shared, isCopy ? AGFX_RESOURCE_STATE_COMMON : ProducerState(producer),
+                                   AGFX_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                    AGFX_SUBRESOURCE_ALL_MIPS, AGFX_SUBRESOURCE_ALL_LAYERS, false);
             drawCmd.TextureBarrier(target, AGFX_RESOURCE_STATE_COMMON, AGFX_RESOURCE_STATE_RENDER_TARGET,
                                    AGFX_SUBRESOURCE_ALL_MIPS, AGFX_SUBRESOURCE_ALL_LAYERS, false);

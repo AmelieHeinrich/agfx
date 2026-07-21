@@ -21,6 +21,14 @@
 #include <cstring>
 #include <sys/stat.h>
 
+#if defined(_WIN32)
+    #include <direct.h>
+    #define mkdir(path, mode) _mkdir(path)
+    #ifndef S_ISDIR
+        #define S_ISDIR(mode) (((mode) & _S_IFDIR) != 0)
+    #endif
+#endif
+
 namespace agfxtest
 {
     namespace

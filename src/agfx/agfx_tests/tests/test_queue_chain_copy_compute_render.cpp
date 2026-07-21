@@ -332,12 +332,12 @@ namespace
             loadConstants.width = kWidth;
             loadConstants.height = kHeight;
 
-            // 1. Graphics queue: into the copy stage's states.
+            // 1. Graphics queue: nothing to transition here -- a D3D12 copy queue requires a
+            //    resource to be in COMMON when it crosses over from another queue type, so source
+            //    and intermediate are left in COMMON and picked up via the transfer queue's implicit
+            //    "assumed at first use" COPY_SOURCE/COPY_DEST state instead. Still recorded and
+            //    submitted so the transfer queue's wait below has a fence value to wait on.
             agfxCommandBufferBegin(preCmd);
-            agfxCommandBufferTextureBarrier(preCmd, source, AGFX_RESOURCE_STATE_COMMON,
-                                            AGFX_RESOURCE_STATE_COPY_SOURCE, 0, 0, 0);
-            agfxCommandBufferTextureBarrier(preCmd, intermediate, AGFX_RESOURCE_STATE_COMMON,
-                                            AGFX_RESOURCE_STATE_COPY_DEST, 0, 0, 0);
             agfxCommandBufferEnd(preCmd);
             agfxCommandQueueSubmit(graphicsQueue, &preCmd, 1);
             agfxCommandQueueSignal(graphicsQueue, fence, 1);
@@ -360,7 +360,9 @@ namespace
             //    understands COMMON/COPY_SOURCE/COPY_DEST, and this is a shader-visible state.
             agfxCommandQueueWait(graphicsQueue, fence, 2);
             agfxCommandBufferBegin(midCmd);
-            agfxCommandBufferTextureBarrier(midCmd, intermediate, AGFX_RESOURCE_STATE_COPY_DEST,
+            // The transfer queue's COPY_DEST usage decays back to COMMON crossing back to the
+            // graphics queue, so that's the "before" state here, not COPY_DEST.
+            agfxCommandBufferTextureBarrier(midCmd, intermediate, AGFX_RESOURCE_STATE_COMMON,
                                             AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, 0, 0, 0);
             agfxCommandBufferTextureBarrier(midCmd, final_, AGFX_RESOURCE_STATE_COMMON,
                                             AGFX_RESOURCE_STATE_UNORDERED_ACCESS, 0, 0, 0);
@@ -518,12 +520,11 @@ namespace
         loadConstants.width = kWidth;
         loadConstants.height = kHeight;
 
-        // 1. Graphics queue: into the copy stage's states.
+        // 1. Graphics queue: nothing to transition here -- a D3D12 copy queue requires a resource
+        //    to be in COMMON when it crosses over from another queue type, so source and
+        //    intermediate are left in COMMON and picked up via the transfer queue's implicit
+        //    "assumed at first use" COPY_SOURCE/COPY_DEST state instead.
         preCmd.Begin();
-        preCmd.TextureBarrier(source, AGFX_RESOURCE_STATE_COMMON, AGFX_RESOURCE_STATE_COPY_SOURCE,
-                              AGFX_SUBRESOURCE_ALL_MIPS, AGFX_SUBRESOURCE_ALL_LAYERS, false);
-        preCmd.TextureBarrier(intermediate, AGFX_RESOURCE_STATE_COMMON, AGFX_RESOURCE_STATE_COPY_DEST,
-                              AGFX_SUBRESOURCE_ALL_MIPS, AGFX_SUBRESOURCE_ALL_LAYERS, false);
         preCmd.End();
         graphicsQueue.Submit(preCmd);
         graphicsQueue.Signal(fence, 1);
@@ -542,7 +543,9 @@ namespace
         // 3. Graphics queue: waits for the copy, into the compute stage's states.
         graphicsQueue.Wait(fence, 2);
         midCmd.Begin();
-        midCmd.TextureBarrier(intermediate, AGFX_RESOURCE_STATE_COPY_DEST,
+        // The transfer queue's COPY_DEST usage decays back to COMMON crossing back to the graphics
+        // queue, so that's the "before" state here, not COPY_DEST.
+        midCmd.TextureBarrier(intermediate, AGFX_RESOURCE_STATE_COMMON,
                               AGFX_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                               AGFX_SUBRESOURCE_ALL_MIPS, AGFX_SUBRESOURCE_ALL_LAYERS, false);
         midCmd.TextureBarrier(final_, AGFX_RESOURCE_STATE_COMMON, AGFX_RESOURCE_STATE_UNORDERED_ACCESS,

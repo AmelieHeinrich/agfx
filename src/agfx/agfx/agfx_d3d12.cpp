@@ -871,7 +871,8 @@ void agfxBufferGetInfo(agfxBuffer* buffer, agfxBufferCreateInfo* info) {
 
 static D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS agfxAccelerationStructureBuildInputs(agfxAccelerationStructure* accelerationStructure) {
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
-    inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
+    inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD
+        | D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION;
     if (accelerationStructure->createInfo.allowUpdate) {
         inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
     }
@@ -1085,7 +1086,7 @@ void agfxAccelerationStructureAddInstances(agfxAccelerationStructure* accelerati
         d3d12Instance.InstanceID = instance->userID;
         d3d12Instance.InstanceMask = 0xFF;
         d3d12Instance.InstanceContributionToHitGroupIndex = 0;
-        d3d12Instance.Flags = instance->opaque ? D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE : D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
+        d3d12Instance.Flags = instance->opaque ? D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE : D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE;
         d3d12Instance.AccelerationStructure = instance->blas->d3d12Resource->GetGPUVirtualAddress();
     }
     accelerationStructure->currentInstanceCount += instanceCount;
@@ -1461,6 +1462,7 @@ agfxRenderPipeline* agfxRenderPipelineCreate(agfxDevice* device, const agfxRende
 
     if (createInfo->meshShader || createInfo->taskShader) {
         D3DX12_MESH_SHADER_PIPELINE_STATE_DESC psoDesc = {};
+        psoDesc.pRootSignature = device->globalRootSignature;
         if (createInfo->taskShader) {
             psoDesc.AS.pShaderBytecode = createInfo->taskShader->createInfo.code;
             psoDesc.AS.BytecodeLength = createInfo->taskShader->createInfo.codeSize;
@@ -1818,7 +1820,7 @@ void agfxComputePassCopyTextureToTexture(agfxComputePass* computePass, agfxTextu
     dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
     dstLoc.SubresourceIndex = subresourceIndex;
 
-    computePass->commandBuffer->d3d12CommandList->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &srcBox);
+    computePass->commandBuffer->d3d12CommandList->CopyTextureRegion(&dstLoc, region->x, region->y, region->z, &srcLoc, &srcBox);
 }
 
 void agfxComputePassSetPipeline(agfxComputePass* computePass, agfxComputePipeline* pipeline) {
@@ -1989,15 +1991,16 @@ D3D12_SHADER_RESOURCE_VIEW_DESC agfxBufferViewTypeToD3D12ShaderResourceViewDesc(
     srvDesc.Format = DXGI_FORMAT_UNKNOWN;
     srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
     if (createInfo->type == AGFX_BUFFER_VIEW_TYPE_RAW) {
+		srvDesc.Format = DXGI_FORMAT_R32_TYPELESS;
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
         srvDesc.Buffer.FirstElement = createInfo->offset / 4;
-        srvDesc.Buffer.NumElements = createInfo->buffer->createInfo.size / 4;
+        srvDesc.Buffer.NumElements = (createInfo->buffer->createInfo.size - createInfo->offset) / 4;
         srvDesc.Buffer.StructureByteStride = 0;
     } else if (createInfo->type == AGFX_BUFFER_VIEW_TYPE_STRUCTURED) {
         srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srvDesc.Buffer.FirstElement = createInfo->offset / createInfo->buffer->createInfo.stride;
-        srvDesc.Buffer.NumElements = createInfo->buffer->createInfo.size / createInfo->buffer->createInfo.stride;
+        srvDesc.Buffer.NumElements = (createInfo->buffer->createInfo.size - createInfo->offset) / createInfo->buffer->createInfo.stride;
         srvDesc.Buffer.StructureByteStride = createInfo->buffer->createInfo.stride;
         srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
     }
@@ -2011,12 +2014,12 @@ D3D12_UNORDERED_ACCESS_VIEW_DESC agfxBufferViewTypeToD3D12UnorderedAccessViewDes
     if (createInfo->type == AGFX_BUFFER_VIEW_TYPE_RAW) {
         uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
         uavDesc.Buffer.FirstElement = createInfo->offset / 4;
-        uavDesc.Buffer.NumElements = createInfo->buffer->createInfo.size / 4;
+        uavDesc.Buffer.NumElements = (createInfo->buffer->createInfo.size - createInfo->offset) / 4;
         uavDesc.Buffer.StructureByteStride = 0;
         uavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
     } else if (createInfo->type == AGFX_BUFFER_VIEW_TYPE_STRUCTURED) {
         uavDesc.Buffer.FirstElement = createInfo->offset / createInfo->buffer->createInfo.stride;
-        uavDesc.Buffer.NumElements = createInfo->buffer->createInfo.size / createInfo->buffer->createInfo.stride;
+        uavDesc.Buffer.NumElements = (createInfo->buffer->createInfo.size - createInfo->offset) / createInfo->buffer->createInfo.stride;
         uavDesc.Buffer.StructureByteStride = createInfo->buffer->createInfo.stride;
         uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_NONE;
     }
@@ -2025,8 +2028,8 @@ D3D12_UNORDERED_ACCESS_VIEW_DESC agfxBufferViewTypeToD3D12UnorderedAccessViewDes
 
 D3D12_CONSTANT_BUFFER_VIEW_DESC agfxBufferViewTypeToD3D12ConstantBufferViewDesc(agfxBufferViewCreateInfo* createInfo) {
     D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-    cbvDesc.BufferLocation = createInfo->offset;
-    cbvDesc.SizeInBytes = createInfo->buffer->createInfo.size;
+    cbvDesc.BufferLocation = createInfo->buffer->d3d12Resource->GetGPUVirtualAddress() + createInfo->offset;
+    cbvDesc.SizeInBytes = (UINT)(createInfo->buffer->createInfo.size - createInfo->offset);
     return cbvDesc;
 }
 
@@ -2205,7 +2208,7 @@ D3D12_SHADER_RESOURCE_VIEW_DESC agfxTextureViewTypeToD3D12ShaderResourceViewDesc
             srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
             srvDesc.Texture2D.MostDetailedMip = createInfo->baseMipLevel;
             srvDesc.Texture2D.MipLevels = createInfo->mipLevelCount == AGFX_SUBRESOURCE_ALL_MIPS ? createInfo->texture->createInfo.mipLevels - createInfo->baseMipLevel : createInfo->mipLevelCount;
-            srvDesc.Texture2D.PlaneSlice = createInfo->baseArrayLayer;
+            srvDesc.Texture2D.PlaneSlice = 0; // PlaneSlice addresses planar formats (e.g. NV12), not array layers.
             break;
         case AGFX_TEXTURE_TYPE_2D_ARRAY:
             srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
@@ -2240,7 +2243,7 @@ D3D12_UNORDERED_ACCESS_VIEW_DESC agfxTextureViewTypeToD3D12UnorderedAccessViewDe
         case AGFX_TEXTURE_TYPE_2D:
             uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
             uavDesc.Texture2D.MipSlice = createInfo->baseMipLevel;
-            uavDesc.Texture2D.PlaneSlice = createInfo->baseArrayLayer;
+            uavDesc.Texture2D.PlaneSlice = 0; // PlaneSlice addresses planar formats (e.g. NV12), not array layers.
             break;
         case AGFX_TEXTURE_TYPE_2D_ARRAY:
             uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
@@ -2251,8 +2254,8 @@ D3D12_UNORDERED_ACCESS_VIEW_DESC agfxTextureViewTypeToD3D12UnorderedAccessViewDe
         case AGFX_TEXTURE_TYPE_3D:
             uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
             uavDesc.Texture3D.MipSlice = createInfo->baseMipLevel;
-            uavDesc.Texture3D.FirstWSlice = createInfo->baseArrayLayer;
-            uavDesc.Texture3D.WSize = createInfo->arrayLayerCount == AGFX_SUBRESOURCE_ALL_LAYERS ? createInfo->texture->createInfo.depthOrArrayLayers - createInfo->baseArrayLayer : createInfo->arrayLayerCount;
+            uavDesc.Texture3D.FirstWSlice = 0;
+            uavDesc.Texture3D.WSize = createInfo->texture->createInfo.depthOrArrayLayers;
             break;
         case AGFX_TEXTURE_TYPE_CUBE:
             uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;

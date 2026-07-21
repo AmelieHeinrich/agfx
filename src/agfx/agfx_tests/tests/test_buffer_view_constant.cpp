@@ -265,6 +265,10 @@ AGFX_TEST_BUFFER(BufferViewConstant, Ez)
     contextInfo.windowHandle = nullptr; // headless: no swap chain
     contextInfo.width = 128;
     contextInfo.height = 128;
+    // D3D12 caps a CBV's SizeInBytes at 65536, and the whole ring buffer (budget * framesInFlight) is
+    // what gets sized into each view, so keep the per-frame budget tiny -- this test only ever
+    // allocates one small Parameters struct per frame.
+    contextInfo.dynamicConstantsBudgetPerFrame = 4096;
     agfx::ez::Context context(contextInfo);
 
     const CompiledShader shader = CompileTestShader("constant_buffer.hlsl", AGFX_SHADER_STAGE_COMPUTE, "main_cs");

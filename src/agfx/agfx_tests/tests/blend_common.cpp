@@ -42,12 +42,28 @@ namespace agfxtest
             return info;
         }
 
+        /// @brief The *_COLOR blend factors manipulate RGB and are rejected outright by D3D12 when
+        /// used as an alpha factor; this maps each one to its alpha-channel analog (e.g. SRC_COLOR ->
+        /// SRC_ALPHA) so the alpha blend factors track the same intent as the color ones without
+        /// asking the API for something it can't do. ZERO/ONE and the already-alpha factors pass
+        /// through unchanged.
+        agfxBlendFactor AlphaEquivalent(agfxBlendFactor factor)
+        {
+            switch (factor) {
+                case AGFX_BLEND_FACTOR_SRC_COLOR:          return AGFX_BLEND_FACTOR_SRC_ALPHA;
+                case AGFX_BLEND_FACTOR_ONE_MINUS_SRC_COLOR: return AGFX_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                case AGFX_BLEND_FACTOR_DST_COLOR:          return AGFX_BLEND_FACTOR_DST_ALPHA;
+                case AGFX_BLEND_FACTOR_ONE_MINUS_DST_COLOR: return AGFX_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+                default:                                    return factor;
+            }
+        }
+
         /// @brief One pipeline per draw: the blend state under test lives entirely in the PSO.
         ///
-        /// The alpha blend factors are set to the same values as the color ones. Blending the alpha
-        /// channel separately is a real feature, but it is not what these tests are measuring, and
-        /// letting the two disagree would make the destination alpha the *next* draw reads depend on
-        /// a second axis of state.
+        /// The alpha blend factors are set to the alpha-channel analog of the color ones (see
+        /// AlphaEquivalent). Blending the alpha channel separately is a real feature, but it is not
+        /// what these tests are measuring, and letting the two disagree would make the destination
+        /// alpha the *next* draw reads depend on a second axis of state.
         agfxRenderPipelineCreateInfo PipelineInfo(const BlendDraw& draw, agfxShaderModule* vs,
                                                   agfxShaderModule* ps)
         {
@@ -66,8 +82,8 @@ namespace agfxtest
             info.srcColorBlendFactor[0] = draw.srcBlend;
             info.dstColorBlendFactor[0] = draw.dstBlend;
             info.colorBlendOp[0] = draw.blendOp;
-            info.srcAlphaBlendFactor[0] = draw.srcBlend;
-            info.dstAlphaBlendFactor[0] = draw.dstBlend;
+            info.srcAlphaBlendFactor[0] = AlphaEquivalent(draw.srcBlend);
+            info.dstAlphaBlendFactor[0] = AlphaEquivalent(draw.dstBlend);
             info.alphaBlendOp[0] = draw.blendOp;
             info.vertexShader = vs;
             info.fragmentShader = ps;

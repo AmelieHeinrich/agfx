@@ -472,8 +472,16 @@ namespace agfx::ez
                 }
                 EnsureRecording();
                 agfx::Buffer staging = CreateStaging(dataSize, data);
+                // Unlike the post-copy barrier this class deliberately skips (see the class comment),
+                // this one isn't optional: CopyBufferToTexture requires the destination to actually be
+                // in COPY_DEST, so it's transitioned in and back out explicitly around the copy.
+                mCommandBuffer.TextureBarrier(dst, AGFX_RESOURCE_STATE_COMMON, AGFX_RESOURCE_STATE_COPY_DEST,
+                                              mipLevel, layer, false);
                 EnsurePass();
                 mComputePass->CopyBufferToTexture(staging, dst, region, mipLevel, layer, bytesPerRow, bytesPerImage);
+                mComputePass.reset();
+                mCommandBuffer.TextureBarrier(dst, AGFX_RESOURCE_STATE_COPY_DEST, AGFX_RESOURCE_STATE_COMMON,
+                                              mipLevel, layer, false);
                 mStagingBuffers.push_back(std::move(staging));
             }
 
@@ -768,6 +776,20 @@ namespace agfx::ez
                 info.depthClampEnable = desc.depthClampEnable ? 1 : 0;
                 info.depthCompareOp = desc.depthCompareOp;
                 info.depthFormat = hasDepth ? depthFormat : AGFX_TEXTURE_FORMAT_UNKNOWN;
+                // The *_COLOR blend factors manipulate RGB and are rejected outright by D3D12 when
+                // used as an alpha factor, so mirror the color factor onto alpha via its
+                // alpha-channel analog (e.g. SRC_COLOR -> SRC_ALPHA) rather than passing it through
+                // unchanged. ZERO/ONE and the already-alpha factors are unaffected.
+                auto alphaEquivalent = [](agfxBlendFactor factor) {
+                    switch (factor) {
+                        case AGFX_BLEND_FACTOR_SRC_COLOR:           return AGFX_BLEND_FACTOR_SRC_ALPHA;
+                        case AGFX_BLEND_FACTOR_ONE_MINUS_SRC_COLOR: return AGFX_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+                        case AGFX_BLEND_FACTOR_DST_COLOR:           return AGFX_BLEND_FACTOR_DST_ALPHA;
+                        case AGFX_BLEND_FACTOR_ONE_MINUS_DST_COLOR: return AGFX_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+                        default:                                    return factor;
+                    }
+                };
+
                 info.colorAttachmentCount = colorCount;
                 for (uint32_t i = 0; i < colorCount; ++i) {
                     info.colorFormats[i] = colorFormats[i];
@@ -775,8 +797,8 @@ namespace agfx::ez
                     info.srcColorBlendFactor[i] = desc.srcBlend;
                     info.dstColorBlendFactor[i] = desc.dstBlend;
                     info.colorBlendOp[i] = desc.blendOp;
-                    info.srcAlphaBlendFactor[i] = desc.srcBlend;
-                    info.dstAlphaBlendFactor[i] = desc.dstBlend;
+                    info.srcAlphaBlendFactor[i] = alphaEquivalent(desc.srcBlend);
+                    info.dstAlphaBlendFactor[i] = alphaEquivalent(desc.dstBlend);
                     info.alphaBlendOp[i] = desc.blendOp;
                 }
                 assert(((desc.vertexShader && !desc.meshShader) || (!desc.vertexShader && desc.meshShader)) &&

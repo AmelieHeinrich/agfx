@@ -126,6 +126,7 @@ namespace agfxtest
             agfxRenderTargetCreateInfo depthRtInfo{};
             depthRtInfo.texture = depthTexture;
             depthRtInfo.format = AGFX_TEXTURE_FORMAT_UNKNOWN;
+            depthRtInfo.isDepth = 1;
             agfxRenderTarget* depthTarget = agfxRenderTargetCreate(device, &depthRtInfo);
 
             std::vector<agfxRenderPipeline*> pipelines;
@@ -221,6 +222,7 @@ namespace agfxtest
             agfxRenderTargetCreateInfo depthRtInfo{};
             depthRtInfo.texture = depthTexture;
             depthRtInfo.format = AGFX_TEXTURE_FORMAT_UNKNOWN;
+            depthRtInfo.isDepth = 1;
             agfx::RenderTarget depthTarget = device.CreateRenderTarget(depthRtInfo);
             if (!colorTarget.Get() || !depthTarget.Get()) {
                 return false;
