@@ -1,33 +1,33 @@
 # Lists of tests to do
 - [x] buffer view byte address
-- [ ] buffer view constant
+- [x] buffer view constant
 - [ ] buffer view rw byte address
-- [ ] buffer view rw structured
-- [ ] buffer view structured
-- [ ] compute buffer atomics
-- [ ] compute multi dispatch buffer
-- [ ] copy buffer to buffer
-- [ ] copy buffer to buffer offset
-- [ ] copy texture to buffer mip
-- [ ] copy texture to buffer
-- [ ] copy texture to buffer slice
-- [ ] upload readback roundtrip
+- [x] buffer view rw structured
+- [x] buffer view structured
+- [x] compute buffer atomics
+- [x] compute multi dispatch buffer
+- [x] copy buffer to buffer
+- [x] copy buffer to buffer offset
+- [x] copy texture to buffer mip
+- [x] copy texture to buffer
+- [x] copy texture to buffer slice
+- [x] upload readback roundtrip
 - [ ] compute multi dispatch texture
-- [ ] compute texture load 2D
+- [x] compute texture load 2D
 - [ ] compute texture load 2D array
 - [ ] compute texture load 3D
-- [ ] compute texture write
+- [x] compute texture write
 - [ ] compute texture write 2D array
 - [ ] compute texture write 3D
-- [ ] copy buffer to texture mip
-- [ ] copy buffer to texture region
-- [ ] copy buffer to texture
-- [ ] copy buffer to texture slice
+- [x] copy buffer to texture mip
+- [x] copy buffer to texture region
+- [x] copy buffer to texture
+- [x] copy buffer to texture slice
 - [ ] copy queue to render queue
 - [ ] compute queue to render queue
-- [ ] copy texture to texture
-- [ ] copy texture to texture mip
-- [ ] copy texture to texture slice
+- [x] copy texture to texture
+- [x] copy texture to texture mip
+- [x] copy texture to texture slice
 - [ ] draw alpha blending (one for each blend test op/factor)
 - [x] draw triangle
 - [ ] draw ccw
@@ -48,7 +48,7 @@
 - [ ] scissor rect
 - [ ] viewport
 - [ ] draw wireframe
-- [ ] write to HDR texture
+- [x] write to HDR texture
 - [ ] copy -> compute -> render queue
 - [ ] render pass clear face
 - [ ] render pass clear slice
@@ -71,8 +71,8 @@
 - [ ] draw mesh tasks indirect, 3 commands + drawID
 - [ ] dispatch indirect
 - [ ] sample depth texture (d32->r32)
-- [ ] texture view format reinterpretation
-- [ ] copy texture region
+- [x] texture view format reinterpretation
+- [x] copy texture region
 - [ ] UAV barriers
 - [ ] MRT (render to 2 different color attachments then add their contents up in the output texture using compute)
 - [ ] render to texture slice
@@ -80,11 +80,11 @@
 - [ ] render to texture mip
 - [ ] depth write disabled
 - [ ] pipeline cull mode
-- [ ] compute shared memory
+- [x] compute shared memory
 - [ ] compute wave ops
 - [ ] texture gather
-- [ ] texture view handle not null
-- [ ] buffer view handle not null
+- [x] texture view handle not null
+- [x] buffer view handle not null
 - [x] sampler handle not null
 - [ ] tlas address not null
 - [ ] rt: trace against blas one triangle geometry

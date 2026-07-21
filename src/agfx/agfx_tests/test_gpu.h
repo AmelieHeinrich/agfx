@@ -101,6 +101,38 @@ namespace agfxtest
     bool ReadbackBuffer(agfxDevice* device, agfxCommandQueue* queue, agfxBuffer* buffer, uint64_t size,
                         agfxResourceState currentState, std::vector<uint8_t>& outBytes);
 
+    /// @brief Copies `size` bytes of host memory into a GPU buffer, via an upload staging buffer.
+    /// `currentState` is the buffer's state on entry; it is restored before returning. The mirror of
+    /// ReadbackBuffer, for tests that need a GPU-only buffer seeded with a known pattern.
+    bool UploadBuffer(agfxDevice* device, agfxCommandQueue* queue, agfxBuffer* buffer, const void* data,
+                      uint64_t size, agfxResourceState currentState);
+
+    /// @brief Copies host pixels into a 2D texture's mip 0, via an upload staging buffer and a
+    /// buffer-to-texture copy. `currentState` is the texture's state on entry; it is restored before
+    /// returning. Only RGBA8_UNORM and RGBA32F are supported, as with ReadbackTexture2D.
+    /// @note `width * bytesPerPixel` should stay 256-byte aligned; D3D12 requires that row pitch for
+    ///       buffer-to-texture copies, so unaligned widths would pass on Metal and fail on Windows.
+    bool UploadTexture2D(agfxDevice* device, agfxCommandQueue* queue, agfxTexture* texture,
+                         uint32_t width, uint32_t height, agfxTextureFormat format, const void* pixels,
+                         agfxResourceState currentState);
+
+    /// @brief As UploadTexture2D, but targets an arbitrary mip level and array layer. `width` and
+    /// `height` are that subresource's dimensions, not the base mip's. Only the addressed
+    /// subresource is transitioned, so the rest of the texture keeps whatever state it was in.
+    bool UploadTextureSubresource(agfxDevice* device, agfxCommandQueue* queue, agfxTexture* texture,
+                                  uint32_t width, uint32_t height, agfxTextureFormat format,
+                                  const void* pixels, agfxResourceState currentState,
+                                  uint32_t mipLevel, uint32_t layer);
+
+    /// @brief As ReadbackTexture2D, but reads an arbitrary mip level and array layer. `width` and
+    /// `height` are that subresource's dimensions. The mirror of UploadTextureSubresource, and what
+    /// the mip/slice copy tests use both to fetch the copy's destination and to confirm the
+    /// neighbouring subresources were left alone.
+    bool ReadbackTextureSubresource(agfxDevice* device, agfxCommandQueue* queue, agfxTexture* texture,
+                                    uint32_t width, uint32_t height, agfxTextureFormat format,
+                                    agfxResourceState currentState, uint32_t mipLevel, uint32_t layer,
+                                    Image& outImage);
+
     /// @brief Copies a 2D texture's mip 0 into a host Image, via a readback staging buffer.
     /// Only RGBA8_UNORM and RGBA32F are supported — the two formats the test suite renders to.
     /// `currentState` is the texture's state on entry; it is restored before returning.

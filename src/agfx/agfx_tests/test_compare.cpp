@@ -42,6 +42,35 @@ namespace agfxtest
             if (b.empty()) return a;
             return a.back() == '/' ? a + b : a + "/" + b;
         }
+
+        /// @brief Reinhard tone map plus a gamma encode, for HDR preview images only.
+        ///
+        /// The report viewer runs in a browser, which cannot decode radiance HDR — pointing it at an
+        /// .hdr artifact leaves the panel blank, and saving one straight to PNG clamps every
+        /// above-1.0 texel to white. HDR tests therefore emit both: the .hdr as the real data, and
+        /// this preview as what the viewer displays. Output and golden go through the identical
+        /// mapping, so a visible difference in the preview is a real difference in the data.
+        Image ToneMappedPreview(const Image& image)
+        {
+            Image preview;
+            preview.width = image.width;
+            preview.height = image.height;
+            preview.pixels.resize(image.pixels.size());
+
+            // A fixed exposure, not an auto one: pure Reinhard squeezes everything above 1.0 into a
+            // narrow bright band, but an exposure derived from image content would differ between
+            // the output and golden panels and could mask a real difference.
+            constexpr float kExposure = 0.25f;
+
+            for (size_t i = 0; i < image.pixels.size(); i += 4) {
+                for (size_t c = 0; c < 3; ++c) {
+                    const float v = std::max(image.pixels[i + c], 0.0f) * kExposure;
+                    preview.pixels[i + c] = std::pow(v / (1.0f + v), 1.0f / 2.2f);
+                }
+                preview.pixels[i + 3] = image.pixels[i + 3]; // alpha passes through untouched
+            }
+            return preview;
+        }
     } // namespace
 
     bool EnsureDirectory(const std::string& dirPath)
@@ -160,6 +189,19 @@ namespace agfxtest
         }
         return stbi_write_png(path.c_str(), (int)image.width, (int)image.height, 4, bytes.data(),
                               (int)image.width * 4) != 0;
+    }
+
+    bool ImageEqualsRgba8(const Image& image, const std::vector<uint8_t>& expected)
+    {
+        if (!image.Valid() || image.pixels.size() != expected.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < expected.size(); ++i) {
+            if (image.pixels[i] != expected[i] / 255.0f) {
+                return false;
+            }
+        }
+        return true;
     }
 
     bool CompareBuffers(const std::vector<uint8_t>& output, const std::vector<uint8_t>& golden,
@@ -325,6 +367,15 @@ namespace agfxtest
             payload.outputPath = outputRel;
         }
 
+        // For HDR the .hdr above is the data of record, but the viewer can't render it; hand it a
+        // tone-mapped PNG instead.
+        if (hdr) {
+            const std::string previewRel = JoinPath(artifactDir, "output.png");
+            if (SaveImage(JoinPath(ctx.OutputDir(), previewRel), ToneMappedPreview(image))) {
+                payload.outputPath = previewRel;
+            }
+        }
+
         if (ctx.UpdateGoldens()) {
             if (!SaveImage(goldenPath, image)) {
                 ctx.Fail(__FILE__, __LINE__, "failed to write golden: " + goldenPath);
@@ -361,6 +412,15 @@ namespace agfxtest
         const std::string flipRel = JoinPath(artifactDir, "flip.png");
         if (SaveImage(JoinPath(ctx.OutputDir(), goldenRel), golden)) payload.goldenPath = goldenRel;
         if (SaveImage(JoinPath(ctx.OutputDir(), flipRel), flip.errorMap)) payload.flipPath = flipRel;
+
+        // Same story as the output above: point the viewer at a tone-mapped preview of the golden,
+        // produced by the identical mapping so the two panels stay comparable by eye.
+        if (hdr) {
+            const std::string previewRel = JoinPath(artifactDir, "golden.png");
+            if (SaveImage(JoinPath(ctx.OutputDir(), previewRel), ToneMappedPreview(golden))) {
+                payload.goldenPath = previewRel;
+            }
+        }
 
         if (flip.meanError > payload.threshold) {
             ctx.Fail(__FILE__, __LINE__,

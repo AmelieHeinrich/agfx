@@ -193,9 +193,112 @@ namespace agfxtest
         return ok;
     }
 
+    bool UploadBuffer(agfxDevice* device, agfxCommandQueue* queue, agfxBuffer* buffer, const void* data,
+                      uint64_t size, agfxResourceState currentState)
+    {
+        if (!device || !queue || !buffer || !data || size == 0) {
+            return false;
+        }
+
+        agfxBufferCreateInfo stagingInfo{};
+        stagingInfo.size = size;
+        stagingInfo.memoryType = AGFX_BUFFER_MEMORY_TYPE_UPLOAD;
+        agfxBuffer* staging = agfxBufferCreate(device, &stagingInfo);
+        if (!staging) {
+            return false;
+        }
+        agfxDeviceMakeResourcesResident(device);
+
+        void* mapped = agfxBufferMap(staging);
+        if (!mapped) {
+            agfxBufferDestroy(device, staging);
+            return false;
+        }
+        memcpy(mapped, data, (size_t)size);
+        agfxBufferUnmap(staging);
+
+        RecordAndWait(device, queue, [&](agfxCommandBuffer* cmd) {
+            agfxCommandBufferBufferBarrier(cmd, buffer, currentState, AGFX_RESOURCE_STATE_COPY_DEST, 0);
+            agfxComputePass* pass = agfxComputePassBegin(cmd, "upload buffer");
+            agfxComputePassCopyBufferToBuffer(pass, staging, buffer, 0, 0, size);
+            agfxComputePassEnd(pass);
+            agfxCommandBufferBufferBarrier(cmd, buffer, AGFX_RESOURCE_STATE_COPY_DEST, currentState, 0);
+        });
+
+        agfxBufferDestroy(device, staging);
+        return true;
+    }
+
+    bool UploadTexture2D(agfxDevice* device, agfxCommandQueue* queue, agfxTexture* texture,
+                         uint32_t width, uint32_t height, agfxTextureFormat format, const void* pixels,
+                         agfxResourceState currentState)
+    {
+        return UploadTextureSubresource(device, queue, texture, width, height, format, pixels,
+                                        currentState, 0, 0);
+    }
+
+    bool UploadTextureSubresource(agfxDevice* device, agfxCommandQueue* queue, agfxTexture* texture,
+                                  uint32_t width, uint32_t height, agfxTextureFormat format,
+                                  const void* pixels, agfxResourceState currentState,
+                                  uint32_t mipLevel, uint32_t layer)
+    {
+        const uint32_t bpp = BytesPerPixel(format);
+        if (!device || !queue || !texture || !pixels || width == 0 || height == 0 || bpp == 0) {
+            return false;
+        }
+
+        const uint32_t bytesPerRow = width * bpp;
+        const uint64_t byteSize = uint64_t(bytesPerRow) * height;
+
+        agfxBufferCreateInfo stagingInfo{};
+        stagingInfo.size = byteSize;
+        stagingInfo.memoryType = AGFX_BUFFER_MEMORY_TYPE_UPLOAD;
+        agfxBuffer* staging = agfxBufferCreate(device, &stagingInfo);
+        if (!staging) {
+            return false;
+        }
+        agfxDeviceMakeResourcesResident(device);
+
+        void* mapped = agfxBufferMap(staging);
+        if (!mapped) {
+            agfxBufferDestroy(device, staging);
+            return false;
+        }
+        memcpy(mapped, pixels, (size_t)byteSize);
+        agfxBufferUnmap(staging);
+
+        agfxTextureRegion region{};
+        region.width = width;
+        region.height = height;
+        region.depth = 1;
+
+        RecordAndWait(device, queue, [&](agfxCommandBuffer* cmd) {
+            agfxCommandBufferTextureBarrier(cmd, texture, currentState, AGFX_RESOURCE_STATE_COPY_DEST,
+                                            mipLevel, layer, 0);
+            agfxComputePass* pass = agfxComputePassBegin(cmd, "upload texture");
+            agfxComputePassCopyBufferToTexture(pass, staging, texture, &region, mipLevel, layer,
+                                               bytesPerRow, (uint32_t)byteSize);
+            agfxComputePassEnd(pass);
+            agfxCommandBufferTextureBarrier(cmd, texture, AGFX_RESOURCE_STATE_COPY_DEST, currentState,
+                                            mipLevel, layer, 0);
+        });
+
+        agfxBufferDestroy(device, staging);
+        return true;
+    }
+
     bool ReadbackTexture2D(agfxDevice* device, agfxCommandQueue* queue, agfxTexture* texture,
                            uint32_t width, uint32_t height, agfxTextureFormat format,
                            agfxResourceState currentState, Image& outImage)
+    {
+        return ReadbackTextureSubresource(device, queue, texture, width, height, format, currentState,
+                                          0, 0, outImage);
+    }
+
+    bool ReadbackTextureSubresource(agfxDevice* device, agfxCommandQueue* queue, agfxTexture* texture,
+                                    uint32_t width, uint32_t height, agfxTextureFormat format,
+                                    agfxResourceState currentState, uint32_t mipLevel, uint32_t layer,
+                                    Image& outImage)
     {
         const uint32_t bpp = BytesPerPixel(format);
         if (!device || !queue || !texture || width == 0 || height == 0 || bpp == 0) {
@@ -220,12 +323,14 @@ namespace agfxtest
         region.depth = 1;
 
         RecordAndWait(device, queue, [&](agfxCommandBuffer* cmd) {
-            agfxCommandBufferTextureBarrier(cmd, texture, currentState, AGFX_RESOURCE_STATE_COPY_SOURCE, 0, 0, 0);
+            agfxCommandBufferTextureBarrier(cmd, texture, currentState, AGFX_RESOURCE_STATE_COPY_SOURCE,
+                                            mipLevel, layer, 0);
             agfxComputePass* pass = agfxComputePassBegin(cmd, "readback texture");
-            agfxComputePassCopyTextureToBuffer(pass, texture, staging, 0, &region, 0, 0, bytesPerRow,
-                                               (uint32_t)byteSize);
+            agfxComputePassCopyTextureToBuffer(pass, texture, staging, 0, &region, mipLevel, layer,
+                                               bytesPerRow, (uint32_t)byteSize);
             agfxComputePassEnd(pass);
-            agfxCommandBufferTextureBarrier(cmd, texture, AGFX_RESOURCE_STATE_COPY_SOURCE, currentState, 0, 0, 0);
+            agfxCommandBufferTextureBarrier(cmd, texture, AGFX_RESOURCE_STATE_COPY_SOURCE, currentState,
+                                            mipLevel, layer, 0);
         });
 
         void* mapped = agfxBufferMap(staging);

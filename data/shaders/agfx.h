@@ -90,7 +90,9 @@ class AGFXTexture2D
     ResourceHandle Handle() { return handle; }
     Texture2D<T>   Resource() { return texture; }
 
-    T    Load(int2 location)                                                         { return texture.Load(location); }
+    // `location` is a texel coordinate; mip 0 is implied, matching AGFXRWTexture2D::Load. Use
+    // Resource().Load(int3(xy, mip)) to read a specific mip.
+    T    Load(int2 location)                                                         { return texture.Load(int3(location, 0)); }
     T    Sample(AGFXSampler s, float2 location)                                   { return texture.Sample(s.state, location); }
     T    SampleLevel(AGFXSampler s, float2 location, float lod)                   { return texture.SampleLevel(s.state, location, lod); }
     T    SampleBias(AGFXSampler s, float2 location, float bias)                   { return texture.SampleBias(s.state, location, bias); }
@@ -117,7 +119,9 @@ class AGFXTexture2DArray
     ResourceHandle Handle() { return handle; }
     Texture2DArray<T>   Resource() { return texture; }
 
-    T    Load(int3 location)                                                         { return texture.Load(location); }
+    // `location` is (x, y, slice); mip 0 is implied, matching AGFXRWTexture2DArray::Load. Use
+    // Resource().Load(int4(xy, slice, mip)) to read a specific mip.
+    T    Load(int3 location)                                                         { return texture.Load(int4(location, 0)); }
     T    Sample(AGFXSampler s, float3 location)                                   { return texture.Sample(s.state, location); }
     T    SampleLevel(AGFXSampler s, float3 location, float lod)                   { return texture.SampleLevel(s.state, location, lod); }
     T    SampleBias(AGFXSampler s, float3 location, float bias)                   { return texture.SampleBias(s.state, location, bias); }

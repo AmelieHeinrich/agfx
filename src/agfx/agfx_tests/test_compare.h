@@ -52,6 +52,15 @@ namespace agfxtest
     bool CompareBuffers(const std::vector<uint8_t>& output, const std::vector<uint8_t>& golden,
                         BufferPayload& payload);
 
+    /// @brief Exact equality between a readback Image and the RGBA8 pixels it was expected to hold.
+    ///
+    /// The golden-backed assertions cannot serve as an oracle on their own: under --update-goldens
+    /// they record whatever the backend produced, so a systematically wrong result becomes the
+    /// expectation. Tests that know their expected contents analytically — the mip/slice copies, for
+    /// one — check them here as well. Byte b is compared against b/255.0f, which readback produces
+    /// exactly, so this is an exact comparison rather than a tolerance.
+    bool ImageEqualsRgba8(const Image& image, const std::vector<uint8_t>& expected);
+
     struct FlipResult
     {
         float meanError = 0.0f;
