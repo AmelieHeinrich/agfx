@@ -77,6 +77,8 @@ This project was written using AI tools (Claude Code) -- I wrote most of the bac
 - Mac: Apple Silicon M1 and above (M3+ for mesh shading and raytracing) and macOS 26+
 - Windows: Any GPU that supports bindless
 
+On some GPUs, you might need to ship the D3D12 Agility SDK to access features like raytracing, mesh shaders, bindless or multi-draw indirect.
+
 ### Compiling
 - Install [xmake](https://xmake.io)
 - xmake
