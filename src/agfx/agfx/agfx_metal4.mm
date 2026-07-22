@@ -738,6 +738,17 @@ kernel void icb_convert_dispatch(device const DispatchCommand* commands [[buffer
 
 // Device
 
+struct agfxDevice {
+    agfxDeviceCreateInfo createInfo;
+    id<MTLDevice> device;
+    id<MTLResidencySet> residencySet;
+
+    agfxMetalBindlessManager* bindlessManager = nullptr;
+
+    id<MTLLibrary> internalLibrary;
+    id<MTLComputePipelineState> icbConvertPipelines[4]; // indexed by agfxIndirectBundleType
+};
+
 static void agfxLog(agfxDevice* device, agfxLogSeverity severity, const char* fmt, ...) {
     if (!device->createInfo.logFunction) return;
 
@@ -749,17 +760,6 @@ static void agfxLog(agfxDevice* device, agfxLogSeverity severity, const char* fm
 
     device->createInfo.logFunction(severity, message);
 }
-
-struct agfxDevice {
-    agfxDeviceCreateInfo createInfo;
-    id<MTLDevice> device;
-    id<MTLResidencySet> residencySet;
-
-    agfxMetalBindlessManager* bindlessManager = nullptr;
-
-    id<MTLLibrary> internalLibrary;
-    id<MTLComputePipelineState> icbConvertPipelines[4]; // indexed by agfxIndirectBundleType
-};
 
 agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo) {
     agfxDevice* device = (agfxDevice*)createInfo->allocate(sizeof(agfxDevice));
