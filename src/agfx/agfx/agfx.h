@@ -8,6 +8,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /// @brief Allocation function signature for agfxDeviceCreate.
 /// @param size The number of bytes to allocate.
 typedef void* (*agfxAllocate)(uint64_t size);
@@ -1548,3 +1552,7 @@ agfxComputePipeline* agfxComputePipelineCreate(agfxDevice* device, const agfxCom
 /// @param device A pointer to the agfxDevice that owns the pipeline.
 /// @param pipeline A pointer to the agfxComputePipeline to destroy.
 void agfxComputePipelineDestroy(agfxDevice* device, agfxComputePipeline* pipeline);
+
+#ifdef __cplusplus
+}
+#endif

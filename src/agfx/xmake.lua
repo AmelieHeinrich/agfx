@@ -23,7 +23,11 @@ target("agfx_shader_cli")
 
 target("agfx")
     set_kind("static")
-    
+
+    if is_plat("windows") then
+        set_runtimes("MT")
+    end
+
     if is_plat("macosx") then
         add_files("agfx/agfx_metal4.mm")
         add_frameworks("Metal", "QuartzCore", "CoreGraphics", { public = true })
