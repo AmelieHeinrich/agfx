@@ -87,7 +87,7 @@ int main()
     deviceCreateInfo.free = agfxDealloc;
     deviceCreateInfo.tempAllocate = agfxAlloc;
     deviceCreateInfo.tempFree = agfxDealloc;
-    deviceCreateInfo.enableValidation = true;
+    deviceCreateInfo.enableValidation = false;
     agfxDevice* device = agfxDeviceCreate(&deviceCreateInfo);
 
     agfxDeviceInfo deviceInfo = {};

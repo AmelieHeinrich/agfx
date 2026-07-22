@@ -15,6 +15,8 @@
 
 #include <dispatch/dispatch.h>
 #include <mach/mach_time.h>
+#include <cstdio>
+#include <cstdarg>
 
 // Types
 struct agfxRenderPipeline {
@@ -735,6 +737,19 @@ kernel void icb_convert_dispatch(device const DispatchCommand* commands [[buffer
 )METAL";
 
 // Device
+
+static void agfxLog(agfxDevice* device, agfxLogSeverity severity, const char* fmt, ...) {
+    if (!device->createInfo.logFunction) return;
+
+    char message[1024];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(message, sizeof(message), fmt, args);
+    va_end(args);
+
+    device->createInfo.logFunction(severity, message);
+}
+
 struct agfxDevice {
     agfxDeviceCreateInfo createInfo;
     id<MTLDevice> device;
@@ -750,10 +765,20 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo) {
     agfxDevice* device = (agfxDevice*)createInfo->allocate(sizeof(agfxDevice));
     memcpy(&device->createInfo, createInfo, sizeof(agfxDeviceCreateInfo));
     device->device = MTLCreateSystemDefaultDevice();
+    if (!device->device) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxDeviceCreate: MTLCreateSystemDefaultDevice returned nil, no Metal-capable GPU found");
+        createInfo->free(device);
+        return nullptr;
+    }
 
     MTLResidencySetDescriptor* residencySetDesc = [MTLResidencySetDescriptor new];
     residencySetDesc.label = @"ResidencySet";
-    device->residencySet = [device->device newResidencySetWithDescriptor:residencySetDesc error:nil];
+    NSError* residencySetError = nil;
+    device->residencySet = [device->device newResidencySetWithDescriptor:residencySetDesc error:&residencySetError];
+    if (!device->residencySet) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxDeviceCreate: newResidencySetWithDescriptor failed: %s",
+            residencySetError.localizedDescription.UTF8String);
+    }
 
     void* memory = createInfo->allocate(sizeof(agfxMetalBindlessManager));
     device->bindlessManager = new(memory) agfxMetalBindlessManager(device->device, device->residencySet);
@@ -764,7 +789,8 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo) {
                                                           options:nil
                                                             error:&internalLibraryError];
     if (!device->internalLibrary) {
-        NSLog(@"agfx: failed to compile internal shader library: %@", internalLibraryError);
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxDeviceCreate: failed to compile internal shader library: %s",
+            internalLibraryError.localizedDescription.UTF8String);
     } else {
         static const char* kICBConvertEntryPoints[4] = {
             "icb_convert_draw",         // AGFX_INDIRECT_BUNDLE_TYPE_DRAW
@@ -777,7 +803,8 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo) {
             NSError* pipelineError = nil;
             device->icbConvertPipelines[i] = [device->device newComputePipelineStateWithFunction:function error:&pipelineError];
             if (!device->icbConvertPipelines[i]) {
-                NSLog(@"agfx: failed to create %s pipeline: %@", kICBConvertEntryPoints[i], pipelineError);
+                agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxDeviceCreate: failed to create %s pipeline: %s",
+                    kICBConvertEntryPoints[i], pipelineError.localizedDescription.UTF8String);
             }
         }
     }
@@ -849,7 +876,14 @@ agfxQueryPool* agfxQueryPoolCreate(agfxDevice* device, agfxCommandQueue* queue, 
     MTL4CounterHeapDescriptor* desc = [MTL4CounterHeapDescriptor new];
     desc.type = MTL4CounterHeapTypeTimestamp;
     desc.count = createInfo->count;
-    pool->heap = [device->device newCounterHeapWithDescriptor:desc error:nil];
+    NSError* heapError = nil;
+    pool->heap = [device->device newCounterHeapWithDescriptor:desc error:&heapError];
+    if (!pool->heap) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxQueryPoolCreate: newCounterHeapWithDescriptor failed: %s",
+            heapError.localizedDescription.UTF8String);
+        device->createInfo.free(pool);
+        return nullptr;
+    }
     return pool;
 }
 
@@ -886,6 +920,11 @@ agfxCommandQueue* agfxCommandQueueCreate(agfxDevice* device, const agfxCommandQu
     agfxCommandQueue* queue = (agfxCommandQueue*)device->createInfo.allocate(sizeof(agfxCommandQueue));
     memcpy(&queue->createInfo, createInfo, sizeof(agfxCommandQueueCreateInfo));
     queue->commandQueue = [device->device newMTL4CommandQueue];
+    if (!queue->commandQueue) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxCommandQueueCreate: newMTL4CommandQueue failed");
+        device->createInfo.free(queue);
+        return nullptr;
+    }
     [queue->commandQueue addResidencySet:device->residencySet];
     return queue;
 }
@@ -930,13 +969,21 @@ agfxCommandBuffer* agfxCommandBufferCreate(agfxDevice* device, agfxCommandQueue*
     commandBuffer->device = device;
     commandBuffer->commandAllocator = [device->device newCommandAllocator];
     commandBuffer->commandBuffer = [device->device newCommandBuffer];
+    if (!commandBuffer->commandAllocator || !commandBuffer->commandBuffer) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxCommandBufferCreate: newCommandAllocator or newCommandBuffer failed");
+    }
 
     MTL4ArgumentTableDescriptor* renderArgTableDesc = [MTL4ArgumentTableDescriptor new];
     renderArgTableDesc.label = @"RenderArgumentTable";
     renderArgTableDesc.maxBufferBindCount = 31;
     renderArgTableDesc.maxTextureBindCount = 31;
-    
-    commandBuffer->renderArgumentTable = [device->device newArgumentTableWithDescriptor:renderArgTableDesc error:nil];
+
+    NSError* renderArgTableError = nil;
+    commandBuffer->renderArgumentTable = [device->device newArgumentTableWithDescriptor:renderArgTableDesc error:&renderArgTableError];
+    if (!commandBuffer->renderArgumentTable) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxCommandBufferCreate: newArgumentTableWithDescriptor (render) failed: %s",
+            renderArgTableError.localizedDescription.UTF8String);
+    }
     [commandBuffer->renderArgumentTable setAddress:device->bindlessManager->resourceHeapBuffer.gpuAddress atIndex:kIRDescriptorHeapBindPoint];
     [commandBuffer->renderArgumentTable setAddress:device->bindlessManager->samplerHeapBuffer.gpuAddress atIndex:kIRSamplerHeapBindPoint];
 
@@ -945,7 +992,12 @@ agfxCommandBuffer* agfxCommandBufferCreate(agfxDevice* device, agfxCommandQueue*
     computeArgTableDesc.maxBufferBindCount = 31;
     computeArgTableDesc.maxTextureBindCount = 31;
 
-    commandBuffer->computeArgumentTable = [device->device newArgumentTableWithDescriptor:computeArgTableDesc error:nil];
+    NSError* computeArgTableError = nil;
+    commandBuffer->computeArgumentTable = [device->device newArgumentTableWithDescriptor:computeArgTableDesc error:&computeArgTableError];
+    if (!commandBuffer->computeArgumentTable) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxCommandBufferCreate: newArgumentTableWithDescriptor (compute) failed: %s",
+            computeArgTableError.localizedDescription.UTF8String);
+    }
     [commandBuffer->computeArgumentTable setAddress:device->bindlessManager->resourceHeapBuffer.gpuAddress atIndex:kIRDescriptorHeapBindPoint];
     [commandBuffer->computeArgumentTable setAddress:device->bindlessManager->samplerHeapBuffer.gpuAddress atIndex:kIRSamplerHeapBindPoint];
 
@@ -1047,6 +1099,11 @@ agfxTexture* agfxTextureCreate(agfxDevice* device, const agfxTextureCreateInfo* 
     descriptor.resourceOptions = MTLResourceStorageModeShared;
 
     texture->texture = [device->device newTextureWithDescriptor:descriptor];
+    if (!texture->texture) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxTextureCreate: newTextureWithDescriptor failed");
+        device->createInfo.free(texture);
+        return nullptr;
+    }
     [device->residencySet addAllocation:texture->texture];
 
     return texture;
@@ -1195,6 +1252,11 @@ agfxBuffer* agfxBufferCreate(agfxDevice* device, const agfxBufferCreateInfo* cre
     agfxBuffer* buffer = (agfxBuffer*)device->createInfo.allocate(sizeof(agfxBuffer));
     memcpy(&buffer->createInfo, createInfo, sizeof(agfxBufferCreateInfo));
     buffer->buffer = [device->device newBufferWithLength:createInfo->size options:MTLResourceStorageModeShared];
+    if (!buffer->buffer) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxBufferCreate: newBufferWithLength failed");
+        device->createInfo.free(buffer);
+        return nullptr;
+    }
     [device->residencySet addAllocation:buffer->buffer];
     return buffer;
 }
@@ -1278,6 +1340,11 @@ agfxSampler* agfxSamplerCreate(agfxDevice* device, const agfxSamplerCreateInfo* 
     descriptor.supportArgumentBuffers = YES;
 
     sampler->samplerState = [device->device newSamplerStateWithDescriptor:descriptor];
+    if (!sampler->samplerState) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxSamplerCreate: newSamplerStateWithDescriptor failed");
+        device->createInfo.free(sampler);
+        return nullptr;
+    }
     sampler->allocation = device->bindlessManager->writeSampler(sampler->samplerState, createInfo->lodBias);
 
     return sampler;
@@ -1535,6 +1602,10 @@ agfxTextureFormat agfxSwapChainGetFormat(agfxSwapChain* swapChain) {
 
 agfxTexture* agfxSwapChainAcquireNextTexture(agfxSwapChain* swapChain) {
     swapChain->currentDrawable = [swapChain->metalLayer nextDrawable];
+    if (!swapChain->currentDrawable) {
+        agfxLog(swapChain->device, AGFX_LOG_SEVERITY_WARNING, "agfxSwapChainAcquireNextTexture: nextDrawable returned nil");
+        return nullptr;
+    }
 
     swapChain->wrapperTexture->texture = swapChain->currentDrawable.texture;
     swapChain->wrapperTexture->createInfo.width = (uint32_t)swapChain->currentDrawable.texture.width;
@@ -1563,9 +1634,18 @@ agfxShaderModule* agfxShaderModuleCreate(agfxDevice* device, const agfxShaderMod
     memcpy(&shaderModule->createInfo, createInfo, sizeof(agfxShaderModuleCreateInfo));
 
     dispatch_data_t data = dispatch_data_create(createInfo->code, createInfo->codeSize, dispatch_get_main_queue(), nullptr);
-    id<MTLLibrary> library = [device->device newLibraryWithData:data error:nil];
+    NSError* libraryError = nil;
+    id<MTLLibrary> library = [device->device newLibraryWithData:data error:&libraryError];
+    if (!library) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxShaderModuleCreate: newLibraryWithData failed: %s",
+            libraryError.localizedDescription.UTF8String);
+        device->createInfo.free(shaderModule);
+        return nullptr;
+    }
     id<MTLFunction> function = [library newFunctionWithName:[NSString stringWithUTF8String:createInfo->entryPoint]];
-    if (!library || !function) {
+    if (!function) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxShaderModuleCreate: newFunctionWithName failed for entry point \"%s\"",
+            createInfo->entryPoint);
         device->createInfo.free(shaderModule);
         return nullptr;
     }
@@ -1610,7 +1690,14 @@ agfxRenderPipeline* agfxRenderPipelineCreate(agfxDevice* device, const agfxRende
         }
         meshDescriptor.depthAttachmentPixelFormat = agfxPixelFormatToMTL(createInfo->depthFormat);
 
-        pipeline->pipelineState = [device->device newRenderPipelineStateWithMeshDescriptor:meshDescriptor options:MTLPipelineOptionNone reflection:nil error:nil];
+        NSError* pipelineError = nil;
+        pipeline->pipelineState = [device->device newRenderPipelineStateWithMeshDescriptor:meshDescriptor options:MTLPipelineOptionNone reflection:nil error:&pipelineError];
+        if (!pipeline->pipelineState) {
+            agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxRenderPipelineCreate: newRenderPipelineStateWithMeshDescriptor failed: %s",
+                pipelineError.localizedDescription.UTF8String);
+            device->createInfo.free(pipeline);
+            return nullptr;
+        }
     } else {
         descriptor.label = [NSString stringWithUTF8String:createInfo->name];
         descriptor.vertexFunction = createInfo->vertexShader ? createInfo->vertexShader->function : nil;
@@ -1630,7 +1717,14 @@ agfxRenderPipeline* agfxRenderPipelineCreate(agfxDevice* device, const agfxRende
         descriptor.depthAttachmentPixelFormat = agfxPixelFormatToMTL(createInfo->depthFormat);
         descriptor.inputPrimitiveTopology = agfxPrimitiveTopologyClassToMTL(createInfo->topology);
 
-        pipeline->pipelineState = [device->device newRenderPipelineStateWithDescriptor:descriptor error:nil];
+        NSError* pipelineError = nil;
+        pipeline->pipelineState = [device->device newRenderPipelineStateWithDescriptor:descriptor error:&pipelineError];
+        if (!pipeline->pipelineState) {
+            agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxRenderPipelineCreate: newRenderPipelineStateWithDescriptor failed: %s",
+                pipelineError.localizedDescription.UTF8String);
+            device->createInfo.free(pipeline);
+            return nullptr;
+        }
     }
 
     if (createInfo->depthFormat != AGFX_TEXTURE_FORMAT_UNKNOWN) {
@@ -1660,7 +1754,14 @@ agfxComputePipeline* agfxComputePipelineCreate(agfxDevice* device, const agfxCom
 
     agfxComputePipeline* pipeline = (agfxComputePipeline*)device->createInfo.allocate(sizeof(agfxComputePipeline));
     memcpy(&pipeline->createInfo, createInfo, sizeof(agfxComputePipelineCreateInfo));
-    pipeline->pipelineState = [device->device newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:nil];
+    NSError* pipelineError = nil;
+    pipeline->pipelineState = [device->device newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&pipelineError];
+    if (!pipeline->pipelineState) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxComputePipelineCreate: newComputePipelineStateWithDescriptor failed: %s",
+            pipelineError.localizedDescription.UTF8String);
+        device->createInfo.free(pipeline);
+        return nullptr;
+    }
     return pipeline;
 }
 
@@ -1719,6 +1820,9 @@ agfxAccelerationStructure* agfxAccelerationStructureCreate(agfxDevice* device, c
         accelerationStructure->mtlBottomLevelDescriptor = asDesc;
 
         accelerationStructure->accelerationStructure = [device->device newAccelerationStructureWithSize:accelerationStructure->sizes.accelerationStructureSize];
+        if (!accelerationStructure->accelerationStructure) {
+            agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxAccelerationStructureCreate: newAccelerationStructureWithSize failed (bottom level)");
+        }
         [device->residencySet addAllocation:accelerationStructure->accelerationStructure];
     } else {
         MTL4InstanceAccelerationStructureDescriptor* asDesc = [[MTL4InstanceAccelerationStructureDescriptor alloc] init];
@@ -1742,8 +1846,11 @@ agfxAccelerationStructure* agfxAccelerationStructureCreate(agfxDevice* device, c
 
         accelerationStructure->sizes = [device->device accelerationStructureSizesWithDescriptor:asDesc];
         accelerationStructure->accelerationStructure = [device->device newAccelerationStructureWithSize:accelerationStructure->sizes.accelerationStructureSize];
+        if (!accelerationStructure->accelerationStructure) {
+            agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxAccelerationStructureCreate: newAccelerationStructureWithSize failed (top level)");
+        }
         [device->residencySet addAllocation:accelerationStructure->accelerationStructure];
-        
+
         uint64_t resourceID = accelerationStructure->accelerationStructure.gpuResourceID._impl;
         memcpy(accelerationStructure->mappedResourceIDBuffer, &resourceID, sizeof(uint64_t));
 
@@ -1760,6 +1867,9 @@ agfxAccelerationStructure* agfxAccelerationStructureCreateCompacted(agfxDevice* 
     memcpy(&accelerationStructure->createInfo, createInfo, sizeof(agfxAccelerationStructureCreateInfo));
     accelerationStructure->sizes.accelerationStructureSize = compactedSize;
     accelerationStructure->accelerationStructure = [device->device newAccelerationStructureWithSize:compactedSize];
+    if (!accelerationStructure->accelerationStructure) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxAccelerationStructureCreateCompacted: newAccelerationStructureWithSize failed");
+    }
     [device->residencySet addAllocation:accelerationStructure->accelerationStructure];
     accelerationStructure->accelerationStructure.label = [NSString stringWithUTF8String:createInfo->name];
     return accelerationStructure;
@@ -2098,6 +2208,9 @@ agfxIndirectBundle* agfxIndirectBundleCreate(agfxDevice* device, const agfxIndir
     bundle->icb = [device->device newIndirectCommandBufferWithDescriptor:icbDesc
                                                          maxCommandCount:createInfo->maxCommandCount
                                                                  options:MTLResourceStorageModePrivate];
+    if (!bundle->icb) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxIndirectBundleCreate: newIndirectCommandBufferWithDescriptor failed");
+    }
     [device->residencySet addAllocation:bundle->icb];
 
     bundle->icbContainer = [device->device newBufferWithLength:sizeof(MTLResourceID) options:MTLResourceStorageModeShared];

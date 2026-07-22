@@ -7,6 +7,8 @@
 #include "agfx.h"
 
 #include <cstring>
+#include <cstdio>
+#include <cstdarg>
 #include <vector>
 #include <string>
 #include <new>
@@ -309,6 +311,18 @@ static uint32_t agfxIndirectBundleTypeStride(agfxIndirectBundleType type) {
     }
 }
 
+static void agfxLog(agfxDevice* device, agfxLogSeverity severity, const char* fmt, ...) {
+    if (!device->createInfo.logFunction) return;
+
+    char message[1024];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(message, sizeof(message), fmt, args);
+    va_end(args);
+
+    device->createInfo.logFunction(severity, message);
+}
+
 agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo) {
     agfxDevice* device = (agfxDevice*)createInfo->allocate(sizeof(agfxDevice));
     memset(device, 0, sizeof(agfxDevice));
@@ -318,11 +332,17 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo) {
     if (createInfo->enableValidation) {
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&device->d3d12Debug)))) {
             device->d3d12Debug->EnableDebugLayer();
+        } else {
+            agfxLog(device, AGFX_LOG_SEVERITY_WARNING, "agfxDeviceCreate: D3D12GetDebugInterface failed, debug layer will not be enabled");
         }
         dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
     }
 
-    CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&device->dxgiFactory));
+    if (FAILED(CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&device->dxgiFactory)))) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxDeviceCreate: CreateDXGIFactory2 failed");
+        createInfo->free(device);
+        return NULL;
+    }
 
     // Walk adapters in high-performance order and pick the first one that can actually create a D3D12 device.
     IDXGIAdapter1* adapter1 = nullptr;
@@ -339,13 +359,28 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo) {
         adapter1 = nullptr;
     }
 
+    if (!adapter1) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxDeviceCreate: no suitable D3D12 adapter found");
+        device->dxgiFactory->Release();
+        createInfo->free(device);
+        return NULL;
+    }
+
     adapter1->QueryInterface(IID_PPV_ARGS(&device->dxgiAdapter));
     adapter1->Release();
 
-    D3D12CreateDevice(device->dxgiAdapter, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device->d3d12Device));
+    if (FAILED(D3D12CreateDevice(device->dxgiAdapter, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device->d3d12Device)))) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxDeviceCreate: D3D12CreateDevice failed");
+        device->dxgiAdapter->Release();
+        device->dxgiFactory->Release();
+        createInfo->free(device);
+        return NULL;
+    }
 
     if (createInfo->enableValidation) {
-        device->d3d12Device->QueryInterface(IID_PPV_ARGS(&device->d3d12DebugDevice));
+        if (FAILED(device->d3d12Device->QueryInterface(IID_PPV_ARGS(&device->d3d12DebugDevice)))) {
+            agfxLog(device, AGFX_LOG_SEVERITY_WARNING, "agfxDeviceCreate: failed to query ID3D12DebugDevice");
+        }
 
         D3D12_MESSAGE_SEVERITY supressSeverities[] = {
             D3D12_MESSAGE_SEVERITY_INFO,
@@ -369,6 +404,8 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo) {
             device->d3d12InfoQueue->PushStorageFilter(&filter);
             device->d3d12InfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE);
             device->d3d12InfoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
+        } else {
+            agfxLog(device, AGFX_LOG_SEVERITY_WARNING, "agfxDeviceCreate: failed to query ID3D12InfoQueue");
         }
     }
 
@@ -392,16 +429,48 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo) {
     
     ID3DBlob* signatureBlob = nullptr;
     ID3DBlob* errorBlob = nullptr;
-    D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signatureBlob, &errorBlob);
-    device->d3d12Device->CreateRootSignature(0, signatureBlob->GetBufferPointer(), signatureBlob->GetBufferSize(), IID_PPV_ARGS(&device->globalRootSignature));
-    if (signatureBlob) signatureBlob->Release();
+    if (FAILED(D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signatureBlob, &errorBlob))) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxDeviceCreate: D3D12SerializeRootSignature failed: %s",
+            errorBlob ? (const char*)errorBlob->GetBufferPointer() : "<no error message>");
+        if (signatureBlob) signatureBlob->Release();
+        if (errorBlob) errorBlob->Release();
+        device->descriptorManager->~agfxDescriptorManager();
+        device->createInfo.free(device->descriptorManager);
+        device->d3d12Device->Release();
+        device->dxgiAdapter->Release();
+        device->dxgiFactory->Release();
+        createInfo->free(device);
+        return NULL;
+    }
+    if (FAILED(device->d3d12Device->CreateRootSignature(0, signatureBlob->GetBufferPointer(), signatureBlob->GetBufferSize(), IID_PPV_ARGS(&device->globalRootSignature)))) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxDeviceCreate: CreateRootSignature failed");
+        signatureBlob->Release();
+        if (errorBlob) errorBlob->Release();
+        device->descriptorManager->~agfxDescriptorManager();
+        device->createInfo.free(device->descriptorManager);
+        device->d3d12Device->Release();
+        device->dxgiAdapter->Release();
+        device->dxgiFactory->Release();
+        createInfo->free(device);
+        return NULL;
+    }
+    signatureBlob->Release();
     if (errorBlob) errorBlob->Release();
+
+    // Get device info to determine if mesh shading and ray tracing are supported, so we can create the indirect command signatures accordingly.
+    agfxDeviceInfo deviceInfo = {};
+    agfxDeviceGetInfo(device, &deviceInfo);
 
     // Indirect command signatures: one per bundle type. Argument 0 (when present) is the drawID
     // CONSTANT patch into root param 1, argument 1 is the terminal draw/dispatch stage - so the
     // argument buffer's per-command memory layout is [drawID, drawArguments...] (drawID leading),
     // matching agfxDrawCommand/agfxDrawIndexedCommand/agfxDrawMeshCommand's field order.
     auto createIndirectSignature = [&](agfxIndirectBundleType type, D3D12_INDIRECT_ARGUMENT_TYPE terminalType) {
+        if (!deviceInfo.supportsMeshShaders && type == AGFX_INDIRECT_BUNDLE_TYPE_DRAW_MESH) {
+            agfxLog(device, AGFX_LOG_SEVERITY_WARNING, "agfxDeviceCreate: mesh shading not supported, skipping indirect signature for DRAW_MESH");
+            return;
+        }
+
         uint32_t stride = agfxIndirectBundleTypeStride(type);
 
         D3D12_INDIRECT_ARGUMENT_DESC argumentDescs[2] = {};
@@ -421,7 +490,9 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo) {
         signatureDesc.pArgumentDescs = argumentDescs;
         signatureDesc.NumArgumentDescs = argumentCount;
         signatureDesc.ByteStride = stride;
-        device->d3d12Device->CreateCommandSignature(&signatureDesc, type != AGFX_INDIRECT_BUNDLE_TYPE_DISPATCH ? device->globalRootSignature : nullptr, IID_PPV_ARGS(&device->indirectSignatures[type]));
+        if (FAILED(device->d3d12Device->CreateCommandSignature(&signatureDesc, type != AGFX_INDIRECT_BUNDLE_TYPE_DISPATCH ? device->globalRootSignature : nullptr, IID_PPV_ARGS(&device->indirectSignatures[type])))) {
+            agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxDeviceCreate: CreateCommandSignature failed for indirect bundle type %d", (int)type);
+        }
     };
 
     createIndirectSignature(AGFX_INDIRECT_BUNDLE_TYPE_DRAW, D3D12_INDIRECT_ARGUMENT_TYPE_DRAW);
@@ -489,6 +560,7 @@ struct agfxFence {
 agfxFence* agfxFenceCreate(agfxDevice* device) {
     agfxFence* fence = (agfxFence*)device->createInfo.allocate(sizeof(agfxFence));
     if (FAILED(device->d3d12Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence->d3d12Fence)))) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxFenceCreate: CreateFence failed");
         device->createInfo.free(fence);
         return NULL;
     }
@@ -534,6 +606,7 @@ agfxQueryPool* agfxQueryPoolCreate(agfxDevice* device, agfxCommandQueue* queue, 
 
     agfxQueryPool* pool = (agfxQueryPool*)device->createInfo.allocate(sizeof(agfxQueryPool));
     if (FAILED(device->d3d12Device->CreateQueryHeap(&queryHeapDesc, IID_PPV_ARGS(&pool->d3d12QueryHeap)))) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxQueryPoolCreate: CreateQueryHeap failed");
         device->createInfo.free(pool);
         return NULL;
     }
@@ -559,12 +632,14 @@ agfxQueryPool* agfxQueryPoolCreate(agfxDevice* device, agfxCommandQueue* queue, 
         D3D12_RESOURCE_STATE_COPY_DEST,
         nullptr,
         IID_PPV_ARGS(&pool->d3d12ReadbackBuffer)))) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxQueryPoolCreate: CreateCommittedResource for readback buffer failed");
         pool->d3d12QueryHeap->Release();
         device->createInfo.free(pool);
         return NULL;
     }
 
     if (FAILED(queue->d3d12CommandQueue->GetTimestampFrequency(&pool->timestampFrequency))) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxQueryPoolCreate: GetTimestampFrequency failed");
         pool->d3d12ReadbackBuffer->Release();
         pool->d3d12QueryHeap->Release();
         device->createInfo.free(pool);
@@ -612,6 +687,7 @@ agfxCommandQueue* agfxCommandQueueCreate(agfxDevice* device, const agfxCommandQu
     queueDesc.Type = agfxCommandQueueTypeToD3D12CommandListType(createInfo->type);
 
     if (FAILED(device->d3d12Device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue->d3d12CommandQueue)))) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxCommandQueueCreate: CreateCommandQueue failed");
         device->createInfo.free(queue);
         return NULL;
     }
@@ -647,10 +723,12 @@ agfxCommandBuffer* agfxCommandBufferCreate(agfxDevice* device, agfxCommandQueue*
     commandBuffer->queueType = queue->type;
 
     if (FAILED(device->d3d12Device->CreateCommandAllocator(agfxCommandQueueTypeToD3D12CommandListType(queue->type), IID_PPV_ARGS(&commandBuffer->d3d12CommandAllocator)))) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxCommandBufferCreate: CreateCommandAllocator failed");
         device->createInfo.free(commandBuffer);
         return NULL;
     }
     if (FAILED(device->d3d12Device->CreateCommandList(0, agfxCommandQueueTypeToD3D12CommandListType(queue->type), commandBuffer->d3d12CommandAllocator, nullptr, IID_PPV_ARGS(&commandBuffer->d3d12CommandList)))) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxCommandBufferCreate: CreateCommandList failed");
         commandBuffer->d3d12CommandAllocator->Release();
         device->createInfo.free(commandBuffer);
         return NULL;
@@ -783,6 +861,7 @@ agfxTexture* agfxTextureCreate(agfxDevice* device, const agfxTextureCreateInfo* 
         D3D12_RESOURCE_STATE_COMMON,
         nullptr,
         IID_PPV_ARGS(&texture->d3d12Resource)))) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxTextureCreate: CreateCommittedResource failed");
         device->createInfo.free(texture);
         return NULL;
     }
@@ -833,6 +912,7 @@ agfxBuffer* agfxBufferCreate(agfxDevice* device, const agfxBufferCreateInfo* cre
         D3D12_RESOURCE_STATE_COMMON,
         nullptr,
         IID_PPV_ARGS(&buffer->d3d12Resource)))) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxBufferCreate: CreateCommittedResource failed");
         device->createInfo.free(buffer);
         return NULL;
     }
@@ -944,13 +1024,18 @@ agfxAccelerationStructure* agfxAccelerationStructureCreate(agfxDevice* device, c
         instanceBufferDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         instanceBufferDesc.Format = DXGI_FORMAT_UNKNOWN;
 
-        device->d3d12Device->CreateCommittedResource(
+        if (FAILED(device->d3d12Device->CreateCommittedResource(
             &instanceHeapProperties,
             D3D12_HEAP_FLAG_NONE,
             &instanceBufferDesc,
             D3D12_RESOURCE_STATE_GENERIC_READ,
             nullptr,
-            IID_PPV_ARGS(&accelerationStructure->instanceBuffer));
+            IID_PPV_ARGS(&accelerationStructure->instanceBuffer)))) {
+            agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxAccelerationStructureCreate: CreateCommittedResource for instance buffer failed");
+            accelerationStructure->~agfxAccelerationStructure();
+            device->createInfo.free(accelerationStructure);
+            return NULL;
+        }
 
         D3D12_RANGE readRange = { 0, 0 };
         accelerationStructure->instanceBuffer->Map(0, &readRange, (void**)&accelerationStructure->mappedInstanceBuffer);
@@ -984,6 +1069,7 @@ agfxAccelerationStructure* agfxAccelerationStructureCreate(agfxDevice* device, c
         D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
         nullptr,
         IID_PPV_ARGS(&accelerationStructure->d3d12Resource)))) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxAccelerationStructureCreate: CreateCommittedResource failed");
         if (accelerationStructure->instanceBuffer) accelerationStructure->instanceBuffer->Release();
         accelerationStructure->~agfxAccelerationStructure();
         device->createInfo.free(accelerationStructure);
@@ -1034,6 +1120,7 @@ agfxAccelerationStructure* agfxAccelerationStructureCreateCompacted(agfxDevice* 
         D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
         nullptr,
         IID_PPV_ARGS(&accelerationStructure->d3d12Resource)))) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxAccelerationStructureCreateCompacted: CreateCommittedResource failed");
         accelerationStructure->~agfxAccelerationStructure();
         device->createInfo.free(accelerationStructure);
         return NULL;
@@ -1308,6 +1395,7 @@ agfxSwapChain* agfxSwapChainCreate(agfxDevice* device, const agfxSwapChainCreate
 
     IDXGISwapChain1* swapChain1 = nullptr;
     if (FAILED(device->dxgiFactory->CreateSwapChainForHwnd(swapChain->queue->d3d12CommandQueue, hwnd, &desc, nullptr, nullptr, &swapChain1))) {
+        agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxSwapChainCreate: CreateSwapChainForHwnd failed");
         device->createInfo.free(swapChain);
         return nullptr;
     }
@@ -1440,6 +1528,7 @@ agfxComputePipeline* agfxComputePipelineCreate(agfxDevice* device, const agfxCom
     psoDesc.CS.BytecodeLength = createInfo->computeShader->createInfo.codeSize;
 
 	if (FAILED(device->d3d12Device->CreateComputePipelineState(&psoDesc, IID_PPV_ARGS(&pipeline->d3d12PipelineState)))) {
+		agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxComputePipelineCreate: CreateComputePipelineState failed");
 		device->createInfo.free(pipeline);
 		return NULL;
 	}
@@ -1513,6 +1602,7 @@ agfxRenderPipeline* agfxRenderPipelineCreate(agfxDevice* device, const agfxRende
         streamDesc.SizeInBytes = sizeof(stream);
 
         if (FAILED(device->d3d12Device->CreatePipelineState(&streamDesc, IID_PPV_ARGS(&pipeline->d3d12PipelineState)))) {
+            agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxRenderPipelineCreate: CreatePipelineState (mesh pipeline) failed");
             device->createInfo.free(pipeline);
             return NULL;
         }
@@ -1560,6 +1650,7 @@ agfxRenderPipeline* agfxRenderPipelineCreate(agfxDevice* device, const agfxRende
         psoDesc.InputLayout = { nullptr, 0 };
 
         if (FAILED(device->d3d12Device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pipeline->d3d12PipelineState)))) {
+            agfxLog(device, AGFX_LOG_SEVERITY_ERROR, "agfxRenderPipelineCreate: CreateGraphicsPipelineState failed");
             device->createInfo.free(pipeline);
             return NULL;
         }

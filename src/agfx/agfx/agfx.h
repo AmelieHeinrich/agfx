@@ -16,6 +16,21 @@ typedef void* (*agfxAllocate)(uint64_t size);
 /// @param ptr The pointer to free, or nullptr.
 typedef void (*agfxFree)(void* ptr);
 
+/// @brief Severity level for messages reported through agfxLogFunction.
+typedef enum agfxLogSeverity {
+    /// @brief Informational message, no action required.
+    AGFX_LOG_SEVERITY_INFO,
+    /// @brief A non-fatal issue occurred; a fallback was taken.
+    AGFX_LOG_SEVERITY_WARNING,
+    /// @brief An operation failed and the requested object was not created.
+    AGFX_LOG_SEVERITY_ERROR,
+} agfxLogSeverity;
+
+/// @brief Log function signature for agfxDeviceCreate. Optional; leave nullptr to disable logging.
+/// @param severity The severity of the message.
+/// @param message A null-terminated description of the event.
+typedef void (*agfxLogFunction)(agfxLogSeverity severity, const char* message);
+
 /// @brief A boolean type for agfx. Use 0 for false, non-zero for true.
 typedef int8_t agfxBool;
 
@@ -88,6 +103,8 @@ typedef struct agfxDeviceCreateInfo {
     agfxFree tempFree;
     /// @brief Whether to enable validation layers for debugging. Set to 1 to enable, 0 to disable.
     agfxBool enableValidation;
+    /// @brief Optional log function for reporting warnings and errors from the device and its resources. Leave nullptr to disable logging.
+    agfxLogFunction logFunction;
 } agfxDeviceCreateInfo;
 
 /// @brief Describes the capabilities of an agfxDevice, retrieved via agfxDeviceGetInfo.

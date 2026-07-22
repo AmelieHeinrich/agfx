@@ -135,7 +135,7 @@ int main()
     contextInfo.deviceInfo.free = Deallocate;
     contextInfo.deviceInfo.tempAllocate = Allocate;
     contextInfo.deviceInfo.tempFree = Deallocate;
-    contextInfo.deviceInfo.enableValidation = true;
+    contextInfo.deviceInfo.enableValidation = false;
     contextInfo.width = static_cast<uint32_t>(drawableWidth);
     contextInfo.height = static_cast<uint32_t>(drawableHeight);
     contextInfo.vsync = true;

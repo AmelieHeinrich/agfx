@@ -29,6 +29,7 @@ struct WaveOpsPushConstants
 
 AGFX_PUSH_CONSTANTS(WaveOpsPushConstants, g_Constants);
 
+[WaveSize(32)]
 [numthreads(64, 1, 1)]
 void main_wave_ops_cs(uint3 id : SV_DispatchThreadID)
 {
