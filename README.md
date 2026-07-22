@@ -60,6 +60,10 @@ In this repository you can find a few different folders:
 - agfx_tests: An exhaustive RHI test suite 
 - data/shaders: Helpful HLSL header include, and shaders for agfx_imgui and the demo app
 
+## Bindings
+
+Bindings for Zig, Rust and Odin can be find [here](https://github.com/AmelieHeinrich/agfx-bindings)
+
 ## Missing features (unplanned, PRs open)
 
 - Vulkan backend
