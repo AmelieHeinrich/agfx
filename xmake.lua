@@ -16,8 +16,10 @@ add_linkdirs("data/dlls", {public = true})
 set_rundir(".", {public = true})
 
 -- RPaths for macOS
+-- "data/dlls" is cwd-relative and only works when running from the repo root (see set_rundir).
+-- "@executable_path" / "@loader_path" are binary-relative, so a copied-out binary stays loadable.
 if is_plat("macosx") then
-    add_rpathdirs("data/dlls", { public = true })
+    add_rpathdirs("@executable_path", "@loader_path", "data/dlls", { public = true })
 end
 
 -- Compile flags and platform specific packages

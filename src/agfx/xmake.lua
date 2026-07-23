@@ -21,6 +21,14 @@ target("agfx_shader_cli")
 
     add_deps("agfx_shader")
 
+    -- Ship the shader compiler dylibs next to the binary so it is relocatable
+    if is_plat("macosx") then
+        after_build(function (target)
+            os.cp("$(projectdir)/data/dlls/libdxcompiler.dylib", target:targetdir())
+            os.cp("$(projectdir)/data/dlls/libmetalirconverter.dylib", target:targetdir())
+        end)
+    end
+
 target("agfx")
     set_kind("static")
 

@@ -4,7 +4,7 @@
 ![](.github/ez.png)
 ![](.github/tests.png)
 
-AGFX is a small (<10k LOC) wrapper over D3D12 and Metal 4, designed to make it easier for indie developers to ship games on multiple platforms. It's MIT licensed.
+AGFX is a small (<10k LOC) wrapper over D3D12, Metal 4 and Vulkan, designed to make it easier for indie developers to ship games on multiple platforms. It's MIT licensed.
 
 It is designed to be bindless first, which is pretty reasonable considering any GPU that isn't older than the library's author should support it (I was born in 2006!).
 
@@ -66,7 +66,6 @@ Bindings for Zig, Rust and Odin can be find [here](https://github.com/AmelieHein
 
 ## Missing features (unplanned, PRs open)
 
-- Vulkan backend
 - Sparse resources
 - Resource aliasing
 - GPU heaps
@@ -78,8 +77,9 @@ This project was written using AI tools (Claude Code) -- I wrote most of the bac
 ## Getting started
 
 ### Requirements
-- Mac: Apple Silicon M1 and above (M3+ for mesh shading and raytracing) and macOS 26+
-- Windows: Any GPU that supports bindless
+- Metal: Apple Silicon chip (M3+ required for mesh shading and raytracing)
+- D3D12: Shader Model 6.6
+- Vulkan: 1.4, VK_EXT_descriptor_indexing, SPIR-V 1.4, VK_KHR_shader_draw_parameters, VK_KHR_deferred_hosts_operations, VK_KHR_buffer_device_address
 
 On some GPUs, you might need to ship the D3D12 Agility SDK to access features like raytracing, mesh shaders, bindless or multi-draw indirect.
 
@@ -99,6 +99,7 @@ On Windows:
 - agfx_shader: dxcompiler.lib
 
 ## Changelogs
+- v1.4.0: Vulkan update
 - v1.3.0: Tests update
 - v1.2.0: Multi draw indirect update
 - v1.1.0: Raytracing update
