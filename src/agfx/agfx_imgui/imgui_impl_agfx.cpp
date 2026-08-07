@@ -375,7 +375,7 @@ void ImGui_ImplAGFX_NewFrame()
 
 void ImGui_ImplAGFX_RenderDrawData(ImDrawData* drawData, agfxRenderPass* renderPass, uint32_t fbWidth, uint32_t fbHeight, uint32_t frameIndex)
 {
-    if (!drawData || drawData->CmdListsCount == 0 || fbWidth == 0 || fbHeight == 0)
+    if (!drawData || drawData->CmdLists.Size == 0 || fbWidth == 0 || fbHeight == 0)
         return;
 
     ImGui_ImplAGFX_Data* bd = ImGui_ImplAGFX_GetBackendData();
@@ -433,7 +433,7 @@ void ImGui_ImplAGFX_RenderDrawData(ImDrawData* drawData, agfxRenderPass* renderP
     uint8_t* idxDst = (uint8_t*)agfxBufferMap(bd->IndexBuffer[frameIndex]);
     uint64_t vtxByteOffset = 0;
     uint64_t idxByteOffset = 0;
-    for (int i = 0; i < drawData->CmdListsCount; ++i) {
+    for (int i = 0; i < drawData->CmdLists.Size; ++i) {
         const ImDrawList* list = drawData->CmdLists[i];
         uint64_t vtxBytes = (uint64_t)list->VtxBuffer.Size * sizeof(ImDrawVert);
         uint64_t idxBytes = (uint64_t)list->IdxBuffer.Size * sizeof(ImDrawIdx);
@@ -470,7 +470,7 @@ void ImGui_ImplAGFX_RenderDrawData(ImDrawData* drawData, agfxRenderPass* renderP
 
     int32_t globalVtxOffset = 0;
     int32_t globalIdxOffset = 0;
-    for (int i = 0; i < drawData->CmdListsCount; ++i) {
+    for (int i = 0; i < drawData->CmdLists.Size; ++i) {
         const ImDrawList* list = drawData->CmdLists[i];
         for (int cmdIndex = 0; cmdIndex < list->CmdBuffer.Size; ++cmdIndex) {
             const ImDrawCmd& cmd = list->CmdBuffer[cmdIndex];
