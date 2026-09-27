@@ -175,6 +175,13 @@ struct agfxDescriptorAllocation {
     uint64_t index;
 };
 
+// A resource-slot free deferred until the GPU has actually finished with it. See the comment on
+// agfxDescriptorManager::agfxFreeResourceSlot for why an immediate free is unsafe.
+struct agfxSlotRetire {
+    uint32_t slot;
+    uint64_t retireValue;
+};
+
 struct agfxDescriptorManager {
     const int resourceCount = 1'000'000;
     const int samplerCount = 2048;
@@ -187,6 +194,10 @@ struct agfxDescriptorManager {
           rtvSlotAllocator(rtvCount),
           dsvSlotAllocator(dsvCount),
           device(inDevice) {
+        if (FAILED(inDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&retireFence)))) {
+            retireFence = nullptr;
+        }
+
         D3D12_DESCRIPTOR_HEAP_DESC resourceHeapDesc = {};
         resourceHeapDesc.NumDescriptors = resourceCount;
         resourceHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -218,9 +229,35 @@ struct agfxDescriptorManager {
         if (samplerHeap) samplerHeap->Release();
         if (rtvHeap) rtvHeap->Release();
         if (dsvHeap) dsvHeap->Release();
+        if (retireFence) retireFence->Release();
+    }
+
+    // Called once per agfxCommandQueueSubmit, from any queue. Bumps and signals retireFence so
+    // agfxFreeResourceSlot's deferred frees have a GPU-timeline value to wait against.
+    void onQueueSubmit(ID3D12CommandQueue* queue) {
+        if (!retireFence) return;
+        queue->Signal(retireFence, ++retireFenceValue);
+    }
+
+    // Moves any deferred resource-slot free whose recorded submission has actually finished on the
+    // GPU back into the allocator's free list. Called before every allocate() so a slot can only be
+    // handed out once it's provably safe to reuse.
+    void reclaimRetiredResourceSlots() {
+        if (!retireFence || pendingResourceSlotFrees.empty()) return;
+        uint64_t completed = retireFence->GetCompletedValue();
+        for (size_t i = 0; i < pendingResourceSlotFrees.size();) {
+            if (pendingResourceSlotFrees[i].retireValue <= completed) {
+                resourceSlotAllocator.free(pendingResourceSlotFrees[i].slot);
+                pendingResourceSlotFrees[i] = pendingResourceSlotFrees.back();
+                pendingResourceSlotFrees.pop_back();
+            } else {
+                ++i;
+            }
+        }
     }
 
     agfxDescriptorAllocation writeSRV(ID3D12Resource *resource, D3D12_SHADER_RESOURCE_VIEW_DESC *srvDesc) {
+        reclaimRetiredResourceSlots();
         uint64_t slot = resourceSlotAllocator.allocate();
         if (slot == UINT64_MAX) return { {0}, {0}, UINT32_MAX };
 
@@ -231,6 +268,7 @@ struct agfxDescriptorManager {
     }
 
     agfxDescriptorAllocation writeUAV(ID3D12Resource *resource, D3D12_UNORDERED_ACCESS_VIEW_DESC *uavDesc) {
+        reclaimRetiredResourceSlots();
         uint64_t slot = resourceSlotAllocator.allocate();
         if (slot == UINT64_MAX) return { {0}, {0}, UINT32_MAX };
 
@@ -241,6 +279,7 @@ struct agfxDescriptorManager {
     }
 
     agfxDescriptorAllocation writeCBV(D3D12_CONSTANT_BUFFER_VIEW_DESC *cbvDesc) {
+        reclaimRetiredResourceSlots();
         uint64_t slot = resourceSlotAllocator.allocate();
         if (slot == UINT64_MAX) return { {0}, {0}, UINT32_MAX };
 
@@ -292,8 +331,18 @@ struct agfxDescriptorManager {
         samplerSlotAllocator.free(slot);
     }
 
+    // The resource (SRV/UAV/CBV) heap is bindless: a slot index can be baked into a command buffer's
+    // root/push constants well before that command buffer actually executes on the GPU. Freeing the
+    // slot immediately -- as freeRTVSlot/freeDSVSlot/freeSamplerSlot still do, since nothing bindlessly
+    // indexes into those heaps the same way -- lets the very next writeSRV/writeUAV/writeCBV hand that
+    // same index to an unrelated resource while a still-in-flight (already-submitted, not-yet-completed)
+    // command still reads through it expecting the old one. That's a read of a resource whose view (and,
+    // once its owning buffer/texture is destroyed too, memory) may already be gone -- exactly the
+    // "read of a destroyed resource" MMU fault this fixes. Deferring the free until retireFence proves
+    // the GPU has passed the submission current at free-time closes the hole.
     void agfxFreeResourceSlot(uint32_t slot) {
-        resourceSlotAllocator.free(slot);
+        pendingResourceSlotFrees.push_back({ slot, retireFenceValue });
+        reclaimRetiredResourceSlots();
     }
 
     ID3D12Device7* device;
@@ -305,6 +354,9 @@ struct agfxDescriptorManager {
     agfxSlotAllocator samplerSlotAllocator;
     agfxSlotAllocator rtvSlotAllocator;
     agfxSlotAllocator dsvSlotAllocator;
+    ID3D12Fence* retireFence = nullptr;
+    uint64_t retireFenceValue = 0;
+    std::vector<agfxSlotRetire> pendingResourceSlotFrees;
 };
 
 struct agfxAccelerationStructure {
@@ -381,6 +433,19 @@ agfxDevice* agfxDeviceCreate(const agfxDeviceCreateInfo* createInfo) {
     if (createInfo->enableValidation) {
         if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&device->d3d12Debug)))) {
             device->d3d12Debug->EnableDebugLayer();
+
+            // GPU-Based Validation instruments shaders to check every resource access (bounds,
+            // use-after-free, uninitialized descriptors) as it happens, naming the exact resource --
+            // unlike a post-mortem TDR/Aftermath dump, which can only guess. Costs real perf, but this
+            // is already the opt-in validation path, so the tradeoff is the same one enableValidation
+            // itself already makes.
+            ID3D12Debug1* debug1 = nullptr;
+            if (SUCCEEDED(device->d3d12Debug->QueryInterface(IID_PPV_ARGS(&debug1)))) {
+                debug1->SetEnableGPUBasedValidation(TRUE);
+                debug1->Release();
+            } else {
+                agfxLog(device, AGFX_LOG_SEVERITY_WARNING, "agfxDeviceCreate: ID3D12Debug1 unavailable, GPU-based validation will not be enabled");
+            }
         } else {
             agfxLog(device, AGFX_LOG_SEVERITY_WARNING, "agfxDeviceCreate: D3D12GetDebugInterface failed, debug layer will not be enabled");
         }
@@ -834,6 +899,12 @@ void agfxCommandQueueSubmit(agfxCommandQueue* queue, agfxCommandBuffer** command
         maxLists[i] = commandBuffers[i]->d3d12CommandList;
     }
     queue->d3d12CommandQueue->ExecuteCommandLists(commandBufferCount, (ID3D12CommandList**)maxLists);
+
+    // Marks this submission's place on the GPU timeline so the resource descriptor heap's deferred
+    // slot frees (agfxDescriptorManager::agfxFreeResourceSlot) know when it's actually safe to reuse
+    // a slot, instead of reusing it the instant the CPU calls free.
+    if (commandBufferCount > 0)
+        commandBuffers[0]->device->descriptorManager->onQueueSubmit(queue->d3d12CommandQueue);
 }
 
 // Command buffer
@@ -970,6 +1041,24 @@ void agfxCommandBufferMemoryBarrier(agfxCommandBuffer* commandBuffer, agfxResour
         accessBefore, accessAfter);
 
     CD3DX12_BARRIER_GROUP group(1, &globalBarrier);
+    commandBuffer->d3d12CommandList->Barrier(1, &group);
+}
+
+void agfxCommandBufferBufferBarrier(agfxCommandBuffer* commandBuffer, agfxBuffer* buffer, agfxResourceState oldState, agfxResourceState newState, agfxBool agglomerate) {
+    D3D12_BARRIER_ACCESS accessBefore = agfxResourceStateToD3D12BarrierAccess(oldState);
+    D3D12_BARRIER_ACCESS accessAfter = agfxResourceStateToD3D12BarrierAccess(newState);
+
+    // Same COMMON clamp as agfxCommandBufferMemoryBarrier -- see the note there.
+    if (accessBefore == D3D12_BARRIER_ACCESS_COMMON) {
+        accessAfter = D3D12_BARRIER_ACCESS_COMMON;
+    }
+
+    CD3DX12_BUFFER_BARRIER bufferBarrier(
+        agfxResourceStateToD3D12BarrierSync(oldState), agfxResourceStateToD3D12BarrierSync(newState),
+        accessBefore, accessAfter,
+        buffer->d3d12Resource);
+
+    CD3DX12_BARRIER_GROUP group(1, &bufferBarrier);
     commandBuffer->d3d12CommandList->Barrier(1, &group);
 }
 

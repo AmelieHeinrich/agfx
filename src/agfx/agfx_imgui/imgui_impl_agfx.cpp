@@ -215,7 +215,13 @@ static void ImGui_ImplAGFX_UpdateTexture(ImGui_ImplAGFX_Data* bd, agfxDevice* de
             ImGui_ImplAGFX_UploadTexture(&bd->Uploader, device, backendTex->Texture, &region, packed.data(), dataSize, bytesPerRow, dataSize);
         }
         tex->SetStatus(ImTextureStatus_OK);
-    } else if (tex->Status == ImTextureStatus_WantDestroy && tex->UnusedFrames > 0) {
+    } else if (tex->Status == ImTextureStatus_WantDestroy && tex->UnusedFrames >= (int)bd->InitInfo.FramesInFlight) {
+        // ImGui's own UnusedFrames counter has no idea how deep this backend's pipeline is -- it just
+        // tracks "unused for N of Dear ImGui's own frames". Destroying as soon as it ticks past 0 means
+        // the texture can be freed while a command buffer from framesInFlight-1 frames ago is still
+        // executing on the GPU and sampling it in PSMain (Demo/Shaders/ImGui.hlsl): a use-after-free the debug
+        // layer sees as "read of a destroyed resource". Wait for at least a full framesInFlight cycle of
+        // disuse first, matching how every other retired GPU resource in this codebase is delayed.
         ImGui_ImplAGFX_DestroyFontTexture(device, tex);
     }
 }

@@ -404,6 +404,21 @@ void agfxCommandBufferTextureBarrier(agfxCommandBuffer* commandBuffer, agfxTextu
 ///        queued and flushed at the next pass boundary; D3D12 ignores this flag and always transitions immediately.
 void agfxCommandBufferMemoryBarrier(agfxCommandBuffer* commandBuffer, agfxResourceState oldState, agfxResourceState newState, agfxBool agglomerate);
 
+/// @brief Records a state transition scoped to a single buffer, unlike agfxCommandBufferMemoryBarrier's
+///        global (all-matching-resources) scope. Buffers have no layout to transition, so on the surface
+///        this looks equivalent to the global barrier -- but it is not: D3D12's debug-layer legacy-state
+///        validator (the one behind CopyBufferRegion's INVALID_SUBRESOURCE_STATE check) only updates its
+///        per-resource tracking from a barrier that names the resource. A global barrier never touches
+///        that tracker, so a buffer used as a copy source/dest must be transitioned with this function,
+///        not agfxCommandBufferMemoryBarrier, or the debug layer keeps assuming its state from first use.
+/// @param commandBuffer A pointer to the agfxCommandBuffer to record the barrier in.
+/// @param buffer The buffer being transitioned.
+/// @param oldState The resource state prior GPU access used.
+/// @param newState The resource state subsequent GPU access will use.
+/// @param agglomerate See the note on agfxCommandBufferTextureBarrier: on Metal, pass true so the barrier is
+///        queued and flushed at the next pass boundary; D3D12 ignores this flag and always transitions immediately.
+void agfxCommandBufferBufferBarrier(agfxCommandBuffer* commandBuffer, agfxBuffer* buffer, agfxResourceState oldState, agfxResourceState newState, agfxBool agglomerate);
+
 /// @brief Records the transition from one aliased texture to another sharing the same placement-heap
 ///        memory. Aliased resources are invisible to any usage-derived dependency tracker -- they are
 ///        different handles with no shared subresource -- so this barrier IS the dependency edge

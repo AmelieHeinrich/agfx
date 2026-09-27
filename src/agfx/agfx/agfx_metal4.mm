@@ -1146,6 +1146,16 @@ void agfxCommandBufferMemoryBarrier(agfxCommandBuffer* commandBuffer, agfxResour
     }
 }
 
+void agfxCommandBufferBufferBarrier(agfxCommandBuffer* commandBuffer, agfxBuffer* buffer, agfxResourceState oldState, agfxResourceState newState, agfxBool agglomerate) {
+    // Identical to agfxCommandBufferMemoryBarrier: the tracker is resource-agnostic (stage masks only),
+    // so the buffer pointer plays no role here -- see the note on agfxCommandBufferAliasingBarrier below.
+    if (!agglomerate) return;
+    commandBuffer->barrierTracker.addBarrier(oldState, newState);
+    if (commandBuffer->currentEncoder) {
+        commandBuffer->barrierTracker.encodeInline(commandBuffer->currentEncoder, commandBuffer->currentEncoderStages);
+    }
+}
+
 void agfxCommandBufferAliasingBarrier(agfxCommandBuffer* commandBuffer, agfxTexture* incomingTexture, agfxResourceState outgoingState, agfxResourceState incomingState, agfxBool agglomerate) {
     // Identical to agfxCommandBufferMemoryBarrier: the tracker is already resource-agnostic (it
     // consumes only producer/consumer stage masks derived from the states, see

@@ -1585,6 +1585,29 @@ void agfxCommandBufferMemoryBarrier(agfxCommandBuffer* commandBuffer, agfxResour
     vkCmdPipelineBarrier2(commandBuffer->commandBuffer, &dependencyInfo);
 }
 
+void agfxCommandBufferBufferBarrier(agfxCommandBuffer* commandBuffer, agfxBuffer* buffer, agfxResourceState oldState, agfxResourceState newState, agfxBool agglomerate)
+{
+    // Vulkan has no legacy-state validation quirk like D3D12's -- a global VkMemoryBarrier2 already
+    // orders all matching access correctly. This exists purely to mirror agfxCommandBufferBufferBarrier's
+    // cross-platform signature; scoping it to the actual buffer costs nothing and documents intent.
+    VkBufferMemoryBarrier2 bufferBarrier = { VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 };
+    bufferBarrier.srcStageMask = agfxResourceStateToVkPipelineStage(oldState);
+    bufferBarrier.dstStageMask = agfxResourceStateToVkPipelineStage(newState);
+    bufferBarrier.srcAccessMask = agfxResourceStateToVkAccessFlags(oldState);
+    bufferBarrier.dstAccessMask = agfxResourceStateToVkAccessFlags(newState);
+    bufferBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bufferBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bufferBarrier.buffer = buffer->vkBuffer;
+    bufferBarrier.offset = 0;
+    bufferBarrier.size = VK_WHOLE_SIZE;
+
+    VkDependencyInfo dependencyInfo = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+    dependencyInfo.bufferMemoryBarrierCount = 1;
+    dependencyInfo.pBufferMemoryBarriers = &bufferBarrier;
+
+    vkCmdPipelineBarrier2(commandBuffer->commandBuffer, &dependencyInfo);
+}
+
 void agfxCommandBufferAliasingBarrier(agfxCommandBuffer* commandBuffer, agfxTexture* incomingTexture, agfxResourceState outgoingState, agfxResourceState incomingState, agfxBool agglomerate)
 {
     // Same two-part aliasing workflow as the D3D12 backend's pair of CD3DX12_GLOBAL_BARRIER +
