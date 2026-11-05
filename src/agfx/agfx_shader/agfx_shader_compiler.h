@@ -9,6 +9,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /// @brief Allocation function signature for agfxDeviceCreate.
 /// @param size The number of bytes to allocate.
 /// @param userData The agfxDeviceCreateInfo::userData pointer, passed through verbatim.
@@ -44,7 +48,9 @@ typedef struct agfxShaderCompilerOptions {
 
     /// @brief Path to the dxcompiler shared library to dlopen on Linux. Ignored on Windows/macOS,
     ///        which link DXC statically. If NULL/empty on Linux, defaults to "data/dlls/libdxcompiler.so".
+#if defined(__linux__) && defined(DLOPEN)
     const char* dxCompilerPath;
+#endif
 } agfxShaderCompilerOptions;
 
 typedef struct agfxShaderCompilerResult {
@@ -65,3 +71,7 @@ typedef struct agfxShaderCompilerResult {
 } agfxShaderCompilerResult;
 
 void agfxCompileShader(agfxShaderCompilerOptions* options, agfxShaderCompilerResult* output);
+
+#ifdef __cplusplus
+}
+#endif

@@ -16,7 +16,7 @@ target("agfx_shader")
     elseif is_plat("linux") then
         add_files("agfx_shader/agfx_shader_compiler_linux.cpp")
         add_files("agfx_shader/spirv_reflect/spirv_reflect.c")
-        add_syslinks("dl", { public = true })
+        add_syslinks({"dl", "dxcompiler"}, { public = true })
     end
 
 target("agfx_shader_cli")
