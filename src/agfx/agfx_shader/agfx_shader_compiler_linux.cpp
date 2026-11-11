@@ -137,7 +137,6 @@ void agfxCompileShader(agfxShaderCompilerOptions* options, agfxShaderCompilerRes
     compileArgs.push_back(L"-fvk-bind-sampler-heap");
     compileArgs.push_back(L"1");
     compileArgs.push_back(L"0");
-    compileArgs.push_back(L"-I/home/alex/Code/agfx/data/shaders");
     for (int i = 0; i < options->definesCount; i++) {
         wideDefines.push_back(L"-D" + std::wstring(options->defines[i], options->defines[i] + strlen(options->defines[i])));
         compileArgs.push_back(wideDefines.back().c_str());
