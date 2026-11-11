@@ -734,8 +734,8 @@ void agfxDeviceDestroy(agfxDevice* device)
     if (device->debugMessenger) vkDestroyDebugUtilsMessengerEXT(device->instance, device->debugMessenger, nullptr);
     if (device->instance) vkDestroyInstance(device->instance, nullptr);
 
-    device->createInfo.free(device, device->createInfo.userData);
     device->~agfxDevice();
+    device->createInfo.free(device, device->createInfo.userData);
 }
 
 void agfxDeviceGetInfo(agfxDevice* device, agfxDeviceInfo* info)
