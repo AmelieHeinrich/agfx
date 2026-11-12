@@ -55,6 +55,7 @@ inline const char* ProfileFromType(agfxShaderStage type)
 
 void agfxCompileShader(agfxShaderCompilerOptions* options, agfxShaderCompilerResult* output)
 {
+#if defined(__linux__) && defined(DLOPEN)
     const char* libPath = (options->dxCompilerPath && options->dxCompilerPath[0])
         ? options->dxCompilerPath
         : "data/dlls/libdxcompiler.so";
@@ -66,15 +67,16 @@ void agfxCompileShader(agfxShaderCompilerOptions* options, agfxShaderCompilerRes
     }
 
     dlerror();
-    DxcCreateInstanceProc createInstanceProc = (DxcCreateInstanceProc)dlsym(libHandle, "DxcCreateInstance");
+    DxcCreateInstanceProc DxcCreateInstance = (DxcCreateInstanceProc)dlsym(libHandle, "DxcCreateInstance");
     const char* symError = dlerror();
-    if (symError || !createInstanceProc) {
+    if (symError || !DxcCreateInstance) {
         fprintf(stderr, "Failed to dlsym DxcCreateInstance: %s\n", symError ? symError : "unknown error");
         dlclose(libHandle);
         return;
     }
 
     DlHandleGuard libGuard{libHandle};
+#endif
 
     DxcPtr<IDxcUtils> pUtils;
     DxcPtr<IDxcCompiler3> pCompiler;
@@ -89,11 +91,11 @@ void agfxCompileShader(agfxShaderCompilerOptions* options, agfxShaderCompilerRes
     wchar_t wideEntry[512] = {0};
     swprintf_s(wideEntry, 512, L"%hs", options->entryPoint);
 
-    if (FAILED(createInstanceProc(CLSID_DxcUtils, IID_PPV_ARGS(pUtils.GetAddressOf())))) {
+    if (FAILED(DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(pUtils.GetAddressOf())))) {
         fprintf(stderr, "Failed to create DXC utils!");
         return;
     }
-    if (FAILED(createInstanceProc(CLSID_DxcCompiler, IID_PPV_ARGS(pCompiler.GetAddressOf())))) {
+    if (FAILED(DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(pCompiler.GetAddressOf())))) {
         fprintf(stderr, "Failed to create DXC compiler!");
         return;
     }
@@ -162,7 +164,7 @@ void agfxCompileShader(agfxShaderCompilerOptions* options, agfxShaderCompilerRes
         return;
     }
 
-    uint8_t* result = (uint8_t*)malloc(pShaderBlob->GetBufferSize());
+    uint8_t* result = (uint8_t*)(options->allocate ? options->allocate : defaultAlloc)(pShaderBlob->GetBufferSize(), options->userData);
     memcpy(result, pShaderBlob->GetBufferPointer(), pShaderBlob->GetBufferSize());
     uint64_t bytecodeSize = pShaderBlob->GetBufferSize();
 

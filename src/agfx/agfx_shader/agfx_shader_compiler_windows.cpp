@@ -117,7 +117,7 @@ void agfxCompileShader(agfxShaderCompilerOptions* options, agfxShaderCompilerRes
         return;
     }
 
-    uint8_t* result = (uint8_t*)malloc(pShaderBlob->GetBufferSize());
+    uint8_t* result = (uint8_t*)(options->allocate ? options->allocate : defaultAlloc)(pShaderBlob->GetBufferSize(), options->userData);
     memcpy(result, pShaderBlob->GetBufferPointer(), pShaderBlob->GetBufferSize());
     uint64_t bytecodeSize = pShaderBlob->GetBufferSize();
 

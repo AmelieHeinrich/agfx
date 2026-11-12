@@ -197,7 +197,7 @@ void agfxCompileShader(agfxShaderCompilerOptions* options, agfxShaderCompilerRes
     }
     uint64_t bytecodeSize = IRMetalLibGetBytecodeSize(pMetallib);
 
-    uint8_t* result = (uint8_t*)malloc(bytecodeSize);
+    uint8_t* result = (uint8_t*)(options->allocate ? options->allocate : defaultAlloc)(bytecodeSize, options->userData);
     if (!result) {
         fprintf(stderr, "Failed to allocate memory for shader bytecode\n");
         IRMetalLibBinaryDestroy(pMetallib);
